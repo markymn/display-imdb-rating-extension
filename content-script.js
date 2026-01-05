@@ -13,7 +13,8 @@
     const CONFIG = {
         DEBUG: true,
         DEBOUNCE_DELAY: 500,           // ms to wait before sending batch
-        INTERSECTION_THRESHOLD: 0.1,
+        INTERSECTION_THRESHOLD: 0,      // Trigger as soon as it enters the margin
+        ROOT_MARGIN: '2000px 0px 2000px 0px', // Vertical look-ahead (we use row-based logic for horizontal)
         PROCESSED_ATTR: 'data-imdb-processed',
         WORKER_URL: 'https://imdb-ratings-proxy.markymn-dev.workers.dev'
     };
@@ -53,7 +54,13 @@
             'a[href*="/detail/"]',
             'a[href*="/gp/video/detail/"]',
             'a[href*="/dp/"]'
-        ]
+        ],
+
+        CAROUSEL_WRAPPERS: [
+            '[data-testid="navigation-carousel-wrapper"]',
+            '[data-testid="super-carousel-card"]',
+            '.tst-ordered-collection'
+        ].join(', ')
     };
 
     // ============================================
@@ -64,6 +71,7 @@
         intersectionObserver: null,
         batchQueue: new Map(), // Map<Container, {title, href}>
         sessionCache: new Map(), // Map<href, data> - Client side cache
+        activeRows: new Set(), // Set of Carousel Elements currently in/near viewport
         processingTimeout: null,
     };
 
@@ -326,15 +334,31 @@
     // ============================================
 
     const setupObservers = () => {
-        // Intersection Observer for lazy loading
+        // Intersection Observer for lazy loading (now handles rows/wrappers too)
         state.intersectionObserver = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
+                const isWrapper = entry.target.matches(SELECTORS.CAROUSEL_WRAPPERS);
+
                 if (entry.isIntersecting) {
-                    queueThumbnail(entry.target);
-                    state.intersectionObserver.unobserve(entry.target);
+                    if (isWrapper) {
+                        state.activeRows.add(entry.target);
+                        log('Row became active, queueing all current children:', entry.target);
+                        // Process all currently available movies in this newly active row
+                        const children = entry.target.querySelectorAll(SELECTORS.THUMBNAIL_CONTAINERS);
+                        children.forEach(child => queueThumbnail(child));
+                    } else {
+                        queueThumbnail(entry.target);
+                        state.intersectionObserver.unobserve(entry.target);
+                    }
+                } else if (isWrapper) {
+                    state.activeRows.delete(entry.target);
+                    log('Row became inactive:', entry.target);
                 }
             });
-        }, { threshold: CONFIG.INTERSECTION_THRESHOLD });
+        }, {
+            threshold: CONFIG.INTERSECTION_THRESHOLD,
+            rootMargin: CONFIG.ROOT_MARGIN
+        });
 
         // Mutation Observer for dynamic content
         state.observer = new MutationObserver((mutations) => {
@@ -349,11 +373,25 @@
     };
 
     const scan = () => {
+        // 1. Process Individual Containers
         const containers = document.querySelectorAll(SELECTORS.THUMBNAIL_CONTAINERS);
         containers.forEach(container => {
-            if (!container.hasAttribute(CONFIG.PROCESSED_ATTR)) {
+            if (container.hasAttribute(CONFIG.PROCESSED_ATTR)) return;
+
+            // NEW: Optimization - If the parent row is already active, process immediately
+            const parentRow = container.closest(SELECTORS.CAROUSEL_WRAPPERS);
+            if (parentRow && state.activeRows.has(parentRow)) {
+                queueThumbnail(container);
+            } else {
+                // Otherwise wait for standard intersection (usually for non-carousel items or rows far away)
                 state.intersectionObserver.observe(container);
             }
+        });
+
+        // 2. Observe Row Wrappers
+        const wrappers = document.querySelectorAll(SELECTORS.CAROUSEL_WRAPPERS);
+        wrappers.forEach(wrapper => {
+            state.intersectionObserver.observe(wrapper);
         });
     };
 
