@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "IMDb Ratings on Prime Video",
+  "version": "1.0.0",
+  "description": "Display IMDb ratings on Amazon Prime Video movie thumbnails",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.workers.dev/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.primevideo.com/*",
+        "https://www.amazon.com/gp/video/*",
+        "https://www.amazon.com/Amazon-Video/*"
+      ],
+      "js": [
+        "content-script.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

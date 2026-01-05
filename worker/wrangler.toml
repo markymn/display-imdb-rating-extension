@@ -1,0 +1,9 @@
+name = "imdb-ratings-proxy"
+main = "index.js"
+compatibility_date = "2024-01-01"
+
+# D1 Database Binding
+[[d1_databases]]
+binding = "DB"
+database_name = "prime-movies-storage"
+database_id = "a6f16ed1-1684-48a3-a042-b02a9aa6fb29"

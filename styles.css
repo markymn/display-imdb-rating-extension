@@ -1,0 +1,211 @@
+/**
+ * IMDb Rating Badge Styles
+ * Designed to match Prime Video's visual language
+ */
+
+/* Main rating badge container */
+.imdb-rating-badge {
+  position: absolute !important;
+  top: 2px !important;
+  left: 2px !important;
+  bottom: auto !important;
+  right: auto !important;
+  margin: 0 !important;
+  z-index: 9999;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+
+  min-width: 60px;
+  padding: 4px 6px;
+  /* Minimal padding for flush corner */
+  border-radius: 8px 0 8px 0;
+  margin: 0 !important;
+  /* Ensure it sits strictly in the corner, compensating for any parent border/padding */
+  /* Clean corner fit */
+  box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+
+  /* Opaque dark background */
+  background: linear-gradient(135deg,
+      rgba(0, 0, 0, 1) 0%,
+      rgba(20, 20, 20, 1) 100%);
+  /* Opaque border */
+  border: 1px solid #333333;
+
+  /* Subtle shadow for depth */
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.4),
+    0 1px 3px rgba(0, 0, 0, 0.2);
+
+  /* Smooth appearance */
+  opacity: 0;
+  transform: translateY(-4px);
+  animation: imdb-badge-appear 0.3s ease forwards;
+  animation-delay: 0.1s;
+
+  /* Prevent text selection */
+  user-select: none;
+  pointer-events: auto;
+
+  /* Font styling */
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+
+  /* Backdrop blur for modern browsers */
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+/* Custom position for Top Hero wrapper - inside metadata */
+[data-testid="title-metadata-main"] .imdb-rating-badge {
+  position: static !important;
+  display: inline-flex !important;
+  width: fit-content !important;
+  align-self: flex-start !important;
+  margin-bottom: 16px !important;
+  margin-top: 8px !important;
+  /* Restore standard visuals by removing overrides */
+}
+
+/* Badge appear animation */
+@keyframes imdb-badge-appear {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* IMDb star icon */
+.imdb-rating-star {
+  color: #f5c518;
+  /* IMDb yellow */
+  font-size: 14px;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* Rating value text */
+.imdb-rating-value {
+  color: #ffffff;
+  font-size: 14px;
+  /* Larger text */
+  font-weight: 700;
+  /* Bolder */
+  letter-spacing: 0.5px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* Hover effect - static gradient */
+.imdb-rating-badge:hover {
+  background: linear-gradient(135deg,
+      #000000 0%,
+      #4a3b00 100%);
+  border-color: #f5c518;
+  transform: none;
+  transition: all 0.2s ease;
+}
+
+/* Loading state */
+.imdb-rating-badge.imdb-rating-loading {
+  padding: 6px 10px;
+  background: #000000;
+}
+
+/* Loading spinner */
+.imdb-rating-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #f5c518;
+  border-radius: 50%;
+  animation: imdb-spinner 0.8s linear infinite;
+}
+
+@keyframes imdb-spinner {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Error state (hidden by default) */
+.imdb-rating-badge.imdb-rating-error {
+  display: none;
+}
+
+
+
+/* Responsive adjustments for smaller thumbnails */
+@media (max-width: 768px) {
+  .imdb-rating-badge {
+    padding: 3px 6px;
+    font-size: 11px;
+    top: 4px;
+    left: 4px;
+  }
+
+  .imdb-rating-star {
+    font-size: 11px;
+  }
+
+  .imdb-rating-spinner {
+    width: 10px;
+    height: 10px;
+  }
+}
+
+/* Compact mode for very small thumbnails */
+.imdb-rating-badge.imdb-rating-compact {
+  padding: 2px 4px;
+  font-size: 10px;
+  gap: 2px;
+}
+
+.imdb-rating-compact .imdb-rating-star {
+  font-size: 10px;
+}
+
+/* Ensure badge doesn't interfere with Prime's hover states */
+.imdb-rating-badge {
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease,
+    background 0.2s ease,
+    border-color 0.2s ease;
+}
+
+/* Reduce motion for accessibility */
+@media (prefers-reduced-motion: reduce) {
+  .imdb-rating-badge {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  .imdb-rating-spinner {
+    animation: none;
+  }
+
+  .imdb-rating-badge:hover {
+    transform: none;
+  }
+}
+
+/* Dark mode compatibility (Prime Video is always dark) */
+@media (prefers-color-scheme: dark) {
+
+  /* Already optimized for dark backgrounds */
+  .imdb-rating-badge {
+    border-color: rgba(255, 255, 255, 0.15);
+  }
+}
+
+/* Print styles - hide badges when printing */
+@media print {
+  .imdb-rating-badge {
+    display: none !important;
+  }
+}
