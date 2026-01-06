@@ -9,6 +9,9 @@
   "host_permissions": [
     "https://*.workers.dev/*"
   ],
+  "action": {
+    "default_popup": "popup.html"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"

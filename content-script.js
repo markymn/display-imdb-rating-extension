@@ -14,7 +14,7 @@
         DEBUG: true,
         DEBOUNCE_DELAY: 500,           // ms to wait before sending batch
         INTERSECTION_THRESHOLD: 0,      // Trigger as soon as it enters the margin
-        ROOT_MARGIN: '2000px 0px 2000px 0px', // Vertical look-ahead (we use row-based logic for horizontal)
+        ROOT_MARGIN: '300px 0px 300px 0px', // Queue visible rows + 3 additional rows below
         PROCESSED_ATTR: 'data-imdb-processed',
         WORKER_URL: 'https://imdb-ratings-proxy.markymn-dev.workers.dev'
     };
@@ -69,9 +69,9 @@
     const state = {
         observer: null,
         intersectionObserver: null,
-        batchQueue: new Map(), // Map<Container, {title, href}>
+        processedItems: new Set(), // Track individual movie hrefs/IDs
+        rowObservers: new Map(), // Map<RowElement, MutationObserver>
         sessionCache: new Map(), // Map<href, data> - Client side cache
-        activeRows: new Set(), // Set of Carousel Elements currently in/near viewport
         processingTimeout: null,
     };
 
@@ -80,63 +80,139 @@
     // ============================================
 
     /**
-     * processBatch: Sends the accumulated queue to the worker
+     * calculateBatchSize: Determines batch size based on items visible in a row
      */
-    const processBatch = async () => {
-        if (state.batchQueue.size === 0) return;
+    const calculateBatchSize = (row) => {
+        // Enforce batch size 1 for specific hero types as requested
+        if (row.matches('[data-testid="top-hero-card"], [data-testid="single-item-carousel"]')) {
+            return 1;
+        }
 
-        const batch = Array.from(state.batchQueue.entries());
-        state.batchQueue.clear(); // Clear immediately
+        const rowWidth = row.offsetWidth;
+        const firstItem = row.querySelector(SELECTORS.THUMBNAIL_CONTAINERS);
+        if (!firstItem) return 10; // Default fallback
 
-        const payload = batch.map(([container, data]) => ({
-            title: data.title,
-            href: data.href
-        }));
+        const itemWidth = firstItem.offsetWidth;
+        if (itemWidth === 0) return 10;
 
-        // Map href back to containers for UI update
-        const containerMap = new Map(); // Map<href, Array<Container>>
-        batch.forEach(([container, data]) => {
-            if (data.href) {
-                if (!containerMap.has(data.href)) {
-                    containerMap.set(data.href, []);
+        const visibleCount = Math.floor(rowWidth / itemWidth);
+        return Math.max(visibleCount * 2, 4); // 2x visible items, minimum of 4
+    };
+
+    /**
+     * processRowItems: Collects and batches new items in a row
+     */
+    const processRowItems = (row) => {
+        const batchSize = calculateBatchSize(row);
+
+        // Collect items to process: the row itself if it's a thumbnail, plus any matching children
+        const items = [];
+        if (row.matches(SELECTORS.THUMBNAIL_CONTAINERS)) {
+            items.push(row);
+        }
+
+        // Use querySelectorAll to find all nested thumbnails, then filter out duplicates (only direct or relevant ones)
+        // We use a Set to ensure we don't process the same element twice if row.matches(container)
+        const allFound = Array.from(row.querySelectorAll(SELECTORS.THUMBNAIL_CONTAINERS));
+        const uniqueItems = [row.matches(SELECTORS.THUMBNAIL_CONTAINERS) ? row : null, ...allFound]
+            .filter((el, index, self) => el && self.indexOf(el) === index);
+
+        let currentBatch = [];
+
+        for (const item of uniqueItems) {
+            if (item.hasAttribute(CONFIG.PROCESSED_ATTR)) continue;
+
+            const info = extractInfo(item);
+            if (!info || !info.href) continue;
+
+            // Check if already processed globally
+            if (state.processedItems.has(info.href)) {
+                const cached = state.sessionCache.get(info.href);
+                if (cached) {
+                    injectBadge(item, cached.rating, cached.votes);
+                    item.setAttribute(CONFIG.PROCESSED_ATTR, 'cache-hit');
                 }
-                containerMap.get(data.href).push(container);
+                continue;
             }
-        });
 
-        try {
-            log(`Sending batch of ${payload.length} items...`);
+            currentBatch.push({ container: item, info });
 
-            chrome.runtime.sendMessage({
-                type: 'BATCH_LOOKUP',
-                movies: payload
-            }, (response) => {
-                log('Received batch response:', response);
-                if (response && response.results) {
-                    handleBatchResponse(response.results, containerMap);
-                }
-            });
+            // If we hit the batch size (or if this item itself requires immediate batching)
+            if (currentBatch.length >= batchSize) {
+                sendBatch(currentBatch);
+                currentBatch = [];
+            }
+        }
 
-        } catch (error) {
-            log('Batch processing error:', error);
+        if (currentBatch.length > 0) {
+            sendBatch(currentBatch);
         }
     };
 
-    const handleBatchResponse = (results, containerMap) => {
-        log('Processing results against map keys:', Array.from(containerMap.keys()));
-        results.forEach(item => {
-            log('Processing item:', item);
-            const containers = containerMap.get(item.href);
-            if (!containers) {
-                log('No containers found for href:', item.href);
-                return;
+    /**
+     * sendBatch: Sends a prepared batch of items to the worker
+     */
+    const sendBatch = async (batch) => {
+        const payload = batch.map(item => ({
+            title: item.info.title,
+            href: item.info.href
+        }));
+
+        const containerMap = new Map();
+        batch.forEach(item => {
+            if (!containerMap.has(item.info.href)) {
+                containerMap.set(item.info.href, []);
             }
+            containerMap.get(item.info.href).push(item.container);
+
+            // Mark as pending and add to processed set immediately to prevent double-queueing
+            item.container.setAttribute(CONFIG.PROCESSED_ATTR, 'pending');
+            state.processedItems.add(item.info.href);
+        });
+
+        const CHUNK_SIZE = 25;
+        for (let i = 0; i < payload.length; i += CHUNK_SIZE) {
+            const chunk = payload.slice(i, i + CHUNK_SIZE);
+            log(`Sending batch chunk (${chunk.length} items)...`);
+
+            try {
+                chrome.runtime.sendMessage({
+                    type: 'BATCH_LOOKUP',
+                    movies: chunk
+                }, (response) => {
+                    if (response && response.success && response.results) {
+                        log(`Received ${response.results.length} results for chunk.`);
+                        handleBatchResponse(response.results, containerMap);
+                    } else if (response && response.error) {
+                        logError('Batch chunk failed:', response.error);
+                        // Optional: clear processed status to allow retry on next scroll/scan
+                        chunk.forEach(item => {
+                            const containers = containerMap.get(item.href);
+                            containers?.forEach(c => c.removeAttribute(CONFIG.PROCESSED_ATTR));
+                            state.processedItems.delete(item.href);
+                        });
+                    }
+                });
+            } catch (error) {
+                logError('Runtime message error:', error);
+            }
+        }
+    };
+
+    const logError = (...args) => {
+        console.error('[IMDb Prime ERROR]', ...args);
+    };
+
+
+    const handleBatchResponse = (results, containerMap) => {
+        results.forEach(item => {
+            const containers = containerMap.get(item.href);
+            if (!containers) return;
 
             containers.forEach(container => {
                 if (item.data) {
                     injectBadge(container, item.data.rating, item.data.votes);
                     container.setAttribute(CONFIG.PROCESSED_ATTR, 'success');
-                    // Update session cache
                     state.sessionCache.set(item.href, item.data);
                 } else {
                     container.setAttribute(CONFIG.PROCESSED_ATTR, 'no-data');
@@ -146,47 +222,25 @@
     };
 
     /**
-     * Queue a container for processing
+     * Queue a single thumbnail (fallback for non-row items)
      */
     const queueThumbnail = (container) => {
         if (container.hasAttribute(CONFIG.PROCESSED_ATTR)) return;
 
         const info = extractInfo(container);
-        const isHeroOrCarousel = container.matches('[data-testid="top-hero-card"], [data-testid="single-item-carousel"]');
+        if (!info || !info.href) return;
 
-        // If it's a single-item-carousel, we allow title to be missing (we'll fetch by href only)
-        const isSingleItemCarousel = container.matches('[data-testid="single-item-carousel"]');
-        const hasRequiredInfo = isSingleItemCarousel ? info?.href : (info?.title && info?.href);
-
-        if (!hasRequiredInfo) {
-            // Special handling for Top Hero or Single Item Carousel: Retry if data is missing (it loads dynamically)
-            if (isHeroOrCarousel) {
-                let retries = parseInt(container.getAttribute('data-imdb-retries') || '0');
-                if (retries < 10) { // Retry for ~10 seconds (10 * 1000ms)
-                    container.setAttribute('data-imdb-retries', retries + 1);
-                    console.log(`[IMDb Prime] Retrying dynamic hero/carousel card (${retries + 1}/10)...`);
-                    setTimeout(() => queueThumbnail(container), 1000);
-                    return;
-                }
+        if (state.processedItems.has(info.href)) {
+            const cached = state.sessionCache.get(info.href);
+            if (cached) {
+                injectBadge(container, cached.rating, cached.votes);
+                container.setAttribute(CONFIG.PROCESSED_ATTR, 'cache-hit');
             }
             return;
         }
 
-        // Check session cache
-        if (state.sessionCache.has(info.href)) {
-            const cached = state.sessionCache.get(info.href);
-            injectBadge(container, cached.rating, cached.votes);
-            container.setAttribute(CONFIG.PROCESSED_ATTR, 'cache-hit');
-            return;
-        }
-
-        // Add to batch
-        state.batchQueue.set(container, info);
-        container.setAttribute(CONFIG.PROCESSED_ATTR, 'pending');
-
-        // Debounce batch send
-        clearTimeout(state.processingTimeout);
-        state.processingTimeout = setTimeout(processBatch, CONFIG.DEBOUNCE_DELAY);
+        // Send a single item batch
+        sendBatch([{ container, info }]);
     };
 
     /**
@@ -334,25 +388,51 @@
     // ============================================
 
     const setupObservers = () => {
-        // Intersection Observer for lazy loading (now handles rows/wrappers too)
+        // 1. Intersection Observer for Rows
         state.intersectionObserver = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
-                const isWrapper = entry.target.matches(SELECTORS.CAROUSEL_WRAPPERS);
+                const row = entry.target;
 
                 if (entry.isIntersecting) {
-                    if (isWrapper) {
-                        state.activeRows.add(entry.target);
-                        log('Row became active, queueing all current children:', entry.target);
-                        // Process all currently available movies in this newly active row
-                        const children = entry.target.querySelectorAll(SELECTORS.THUMBNAIL_CONTAINERS);
-                        children.forEach(child => queueThumbnail(child));
-                    } else {
-                        queueThumbnail(entry.target);
-                        state.intersectionObserver.unobserve(entry.target);
+                    log('Row entered viewport context:', row);
+
+                    // a. Process existing items
+                    processRowItems(row);
+
+                    // b. Setup MutationObserver for this row to catch lazy-loaded items
+                    if (!state.rowObservers.has(row)) {
+                        const observer = new MutationObserver((mutations) => {
+                            let hasNewItems = false;
+                            for (const mutation of mutations) {
+                                if (mutation.addedNodes.length) {
+                                    for (const node of mutation.addedNodes) {
+                                        if (node.nodeType === Node.ELEMENT_NODE) {
+                                            if (node.matches(SELECTORS.THUMBNAIL_CONTAINERS) ||
+                                                node.querySelector(SELECTORS.THUMBNAIL_CONTAINERS)) {
+                                                hasNewItems = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if (hasNewItems) break;
+                            }
+                            if (hasNewItems) {
+                                log('New items detected in row via mutation:', row);
+                                processRowItems(row);
+                            }
+                        });
+
+                        observer.observe(row, { childList: true, subtree: true });
+                        state.rowObservers.set(row, observer);
                     }
-                } else if (isWrapper) {
-                    state.activeRows.delete(entry.target);
-                    log('Row became inactive:', entry.target);
+                } else {
+                    // Clean up observer if it leaves the margin (optional, but good for performance)
+                    const observer = state.rowObservers.get(row);
+                    if (observer) {
+                        observer.disconnect();
+                        state.rowObservers.delete(row);
+                    }
                 }
             });
         }, {
@@ -360,7 +440,7 @@
             rootMargin: CONFIG.ROOT_MARGIN
         });
 
-        // Mutation Observer for dynamic content
+        // 2. Global Mutation Observer for new Rows
         state.observer = new MutationObserver((mutations) => {
             let added = false;
             mutations.forEach(m => {
@@ -373,25 +453,22 @@
     };
 
     const scan = () => {
-        // 1. Process Individual Containers
+        // 1. Observe Row Wrappers (Priority)
+        const wrappers = document.querySelectorAll(SELECTORS.CAROUSEL_WRAPPERS);
+        wrappers.forEach(wrapper => {
+            state.intersectionObserver.observe(wrapper);
+        });
+
+        // 2. Process Individual Containers that aren't in a recognized wrapper
         const containers = document.querySelectorAll(SELECTORS.THUMBNAIL_CONTAINERS);
         containers.forEach(container => {
             if (container.hasAttribute(CONFIG.PROCESSED_ATTR)) return;
 
-            // NEW: Optimization - If the parent row is already active, process immediately
             const parentRow = container.closest(SELECTORS.CAROUSEL_WRAPPERS);
-            if (parentRow && state.activeRows.has(parentRow)) {
-                queueThumbnail(container);
-            } else {
-                // Otherwise wait for standard intersection (usually for non-carousel items or rows far away)
+            if (!parentRow) {
+                // If it's not in a row, use standard individual intersection logic
                 state.intersectionObserver.observe(container);
             }
-        });
-
-        // 2. Observe Row Wrappers
-        const wrappers = document.querySelectorAll(SELECTORS.CAROUSEL_WRAPPERS);
-        wrappers.forEach(wrapper => {
-            state.intersectionObserver.observe(wrapper);
         });
     };
 
@@ -400,7 +477,7 @@
     // ============================================
 
     const init = () => {
-        log('Initializing...');
+        log('Initializing Row-Based Batching...');
         setupObservers();
         scan();
     };

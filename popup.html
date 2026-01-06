@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IMDb Rating Extension Settings</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Filter</h1>
+            <p>by minimum rating</p>
+        </header>
+
+        <main>
+            <div class="control-group">
+                <input type="range" id="ratingSlider" min="0.0" max="10.0" step="0.1" value="7.0">
+                <div class="input-wrapper">
+                    <input type="number" id="ratingInput" min="0.0" max="10.0" step="0.1" value="7.0">
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="popup.js"></script>
+</body>
+
+</html>

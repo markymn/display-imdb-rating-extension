@@ -9,8 +9,8 @@
 
 const WORKER_URL = 'https://imdb-ratings-proxy.markymn-dev.workers.dev';
 
-// Debug mode
-const DEBUG = false;
+// Debug mode - ENABLED for troubleshooting
+const DEBUG = true;
 
 /**
  * Debug logging helper
@@ -19,6 +19,10 @@ const log = (...args) => {
     if (DEBUG) {
         console.log('[Background]', ...args);
     }
+};
+
+const logError = (...args) => {
+    console.error('[Background ERROR]', ...args);
 };
 
 // ============================================
@@ -61,16 +65,27 @@ async function handleBatchLookup(message, sendResponse) {
         });
 
         if (!response.ok) {
-            throw new Error(`Worker Error: ${response.status} ${response.statusText}`);
+            let errorDetail = '';
+            try {
+                errorDetail = await response.text();
+            } catch (e) {
+                errorDetail = response.statusText;
+            }
+            throw new Error(`Worker Error ${response.status}: ${errorDetail || response.statusText}`);
         }
 
         const data = await response.json();
 
-        // Worker returns { results: [...] }
+        if (!data || !data.results) {
+            logError('Worker returned invalid JSON/missing results:', data);
+            throw new Error('Worker returned invalid response data');
+        }
+
+        log(`Worker returned ${data.results.length} results.`);
         sendResponse({ success: true, results: data.results });
 
     } catch (error) {
-        console.error('[Background] Batch lookup error:', error);
+        logError('Batch lookup failed:', error);
         sendResponse({ success: false, error: error.message });
     }
 }
