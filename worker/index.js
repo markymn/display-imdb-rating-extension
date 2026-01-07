@@ -106,7 +106,7 @@ export default {
 };
 
 async function processMovieLogic(movie, cached, env) {
-    let { title, href } = movie;
+    let { title, href, entityType } = movie;
     if (!href) return { href, error: 'Missing href' };
 
     if (cached) {
@@ -120,24 +120,39 @@ async function processMovieLogic(movie, cached, env) {
         return { href, error: 'OMDb Lookup skipped: Missing title' };
     }
 
+    // Pre-processing 1: Remove Director's Cut suffix
     const directorsCutRegex = /\s*Director's Cut$/i;
     if (directorsCutRegex.test(title) && title.replace(directorsCutRegex, '').trim().length > 0) {
         title = title.replace(directorsCutRegex, '').trim();
     }
 
-    try {
-        let omdbResult = await fetchOMDb(title, null, env.OMDB_API_KEY);
+    // Pre-processing 2: Remove trailing (...) or [...] - PERMANENTLY UPDATE TITLE
+    title = title.replace(/\s*(?:\([^)]*\)|\[[^\]]*\])\s*$/, '').trim() || title;
 
-        if (!omdbResult) {
-            if (title.includes('&')) {
-                const alt = title.replace(/&/g, ' and ').replace(/\s+/g, ' ').trim();
-                omdbResult = await fetchOMDb(alt, null, env.OMDB_API_KEY);
+    try {
+        let omdbResult = null;
+
+        // Step 1: Try title lookup with cleaned title
+        omdbResult = await fetchOMDbTitle(title, null, env.OMDB_API_KEY);
+
+        // Validate result: type must match AND rating must not be N/A
+        if (omdbResult && !isValidResult(omdbResult, entityType)) {
+            omdbResult = null;
+        }
+
+        // Step 2: If failed, try replacing & with 'and'
+        if (!omdbResult && title.includes('&')) {
+            const altTitle = title.replace(/&/g, ' and ').replace(/\s+/g, ' ').trim();
+            omdbResult = await fetchOMDbTitle(altTitle, null, env.OMDB_API_KEY);
+
+            if (omdbResult && !isValidResult(omdbResult, entityType)) {
+                omdbResult = null;
             }
         }
 
+        // Step 3: Final fallback - OMDb search API using original cleaned title (without & replacement)
         if (!omdbResult) {
-            const alt = title.replace(/\s*\([^)]*\)\s*$/, '').trim();
-            if (alt !== title) omdbResult = await fetchOMDb(alt, null, env.OMDB_API_KEY);
+            omdbResult = await fetchOMDbSearch(title, env.OMDB_API_KEY);
         }
 
         if (!omdbResult) return { href, error: 'OMDb Not Found' };
@@ -159,6 +174,29 @@ async function processMovieLogic(movie, cached, env) {
     }
 }
 
+/**
+ * Validate OMDb result: type must match Prime entity type AND rating must not be N/A
+ */
+function isValidResult(omdbResult, primeEntityType) {
+    // Check rating - must not be N/A
+    if (!omdbResult.imdbRating || omdbResult.imdbRating === 'N/A') {
+        return false;
+    }
+
+    // Check type match if we have Prime entity type
+    if (primeEntityType) {
+        const omdbType = omdbResult.Type?.toLowerCase();
+        // Prime: "Movie" -> OMDb: "movie"
+        // Prime: "TV Show" -> OMDb: "series"
+        const expectedOmdbType = primeEntityType === 'Movie' ? 'movie' : 'series';
+        if (omdbType !== expectedOmdbType) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 function isDataStale(releaseDateStr, updatedAtStr) {
     if (!releaseDateStr) return true;
     const now = Date.now();
@@ -172,12 +210,36 @@ function isDataStale(releaseDateStr, updatedAtStr) {
     return timeSinceUpdate > TTL.STABLE;
 }
 
-async function fetchOMDb(title, year, apiKey) {
+/**
+ * OMDb Title Lookup (exact match)
+ */
+async function fetchOMDbTitle(title, year, apiKey) {
     const params = new URLSearchParams({ apikey: apiKey, t: title });
     if (year) params.append('y', year);
     const res = await fetch(`${OMDB_BASE_URL}/?${params}`);
     const data = await res.json();
     return data.Response === 'True' ? data : null;
+}
+
+/**
+ * OMDb Search API - returns first result with full details
+ */
+async function fetchOMDbSearch(title, apiKey) {
+    const params = new URLSearchParams({ apikey: apiKey, s: title });
+    const res = await fetch(`${OMDB_BASE_URL}/?${params}`);
+    const data = await res.json();
+
+    if (data.Response !== 'True' || !data.Search || data.Search.length === 0) {
+        return null;
+    }
+
+    // Get the first result's IMDb ID and fetch full details
+    const firstResult = data.Search[0];
+    const detailParams = new URLSearchParams({ apikey: apiKey, i: firstResult.imdbID });
+    const detailRes = await fetch(`${OMDB_BASE_URL}/?${detailParams}`);
+    const detailData = await detailRes.json();
+
+    return detailData.Response === 'True' ? detailData : null;
 }
 
 function parseReleaseDate(dateStr) {

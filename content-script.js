@@ -14,7 +14,7 @@
         DEBUG: true,
         DEBOUNCE_DELAY: 500,           // ms to wait before sending batch
         INTERSECTION_THRESHOLD: 0,      // Trigger as soon as it enters the margin
-        ROOT_MARGIN: '300px 0px 300px 0px', // Queue visible rows + 3 additional rows below
+        ROOT_MARGIN: '300px 0px 300px 0px', // Pre-load ratings for rows near viewport
         PROCESSED_ATTR: 'data-imdb-processed',
         WORKER_URL: 'https://imdb-ratings-proxy.markymn-dev.workers.dev'
     };
@@ -73,7 +73,13 @@
         rowObservers: new Map(), // Map<RowElement, MutationObserver>
         sessionCache: new Map(), // Map<href, data> - Client side cache
         processingTimeout: null,
+        currentThreshold: 0.0, // Current minimum rating filter threshold
     };
+
+    // ============================================
+    // EXCLUDED SELECTORS (items that should NOT be filtered)
+    // ============================================
+    const EXCLUDED_FROM_FILTER = '[data-testid="top-hero-card"], [data-testid="single-item-carousel"]';
 
     // ============================================
     // CORE LOGIC
@@ -155,7 +161,8 @@
     const sendBatch = async (batch) => {
         const payload = batch.map(item => ({
             title: item.info.title,
-            href: item.info.href
+            href: item.info.href,
+            entityType: item.info.entityType
         }));
 
         const containerMap = new Map();
@@ -194,7 +201,15 @@
                     }
                 });
             } catch (error) {
-                logError('Runtime message error:', error);
+                if (error.message.includes('Extension context invalidated')) {
+                    log('Extension context invalidated (extension updated/reloaded). Stopping further processing.');
+                    // Disconnect observers to stop processing
+                    if (state.observer) state.observer.disconnect();
+                    if (state.intersectionObserver) state.intersectionObserver.disconnect();
+                    state.rowObservers.forEach(obs => obs.disconnect());
+                } else {
+                    logError('Runtime message error:', error);
+                }
             }
         }
     };
@@ -291,7 +306,10 @@
             href = cleanHref(href);
         }
 
-        return { title, href };
+        // 3. Entity Type (Movie or TV Show)
+        const entityType = container.getAttribute('data-card-entity-type') || null;
+
+        return { title, href, entityType };
     };
 
     const cleanTitle = (text) => {
@@ -373,6 +391,16 @@
         if (target.querySelector('.imdb-rating-badge')) {
             log('Badge already exists, skipping.');
             return;
+        }
+
+        // Apply filter BEFORE showing badge if threshold is set
+        // Skip excluded types (top hero, single carousel)
+        if (state.currentThreshold > 0 && !container.matches(EXCLUDED_FROM_FILTER)) {
+            const ratingNum = parseFloat(rating);
+            if (ratingNum < state.currentThreshold) {
+                // Hide immediately - badge still injected but parent <li> is collapsed
+                hideCard(container);
+            }
         }
 
         const badge = createBadge(rating, votes);
@@ -473,11 +501,147 @@
     };
 
     // ============================================
+    // RATING FILTER (Prime-Safe Hybrid Hide)
+    // ============================================
+
+    const FILTER_ATTR = 'data-pv-hidden';
+
+    /**
+     * Hide a card by collapsing its parent <li> layout slot to zero width
+     * Uses zero-width collapse instead of display:none to preserve Prime's
+     * carousel navigation (arrow keys rely on DOM elements being "present")
+     */
+    const hideCard = (container) => {
+        const li = container.closest('li');
+        if (li && li.getAttribute(FILTER_ATTR) !== 'true') {
+            // Collapse to zero width while keeping in DOM for navigation
+            li.style.cssText = `
+                width: 0 !important;
+                min-width: 0 !important;
+                max-width: 0 !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                overflow: hidden !important;
+                opacity: 0;
+                pointer-events: none;
+            `;
+            li.setAttribute(FILTER_ATTR, 'true');
+        }
+    };
+
+    /**
+     * Restore a hidden card by clearing inline styles from parent <li>
+     */
+    const restoreCard = (container) => {
+        const li = container.closest('li');
+        if (li && li.getAttribute(FILTER_ATTR) === 'true') {
+            li.style.cssText = '';
+            li.removeAttribute(FILTER_ATTR);
+        }
+    };
+
+    /**
+     * Apply rating filter to all processed items
+     * Uses batched DOM updates for instant filtering without visible 1-by-1 effect
+     */
+    const applyRatingFilter = (threshold) => {
+        state.currentThreshold = threshold;
+        log(`Applying rating filter: hiding items below ${threshold}`);
+
+        // Collect all changes first (no DOM modifications yet)
+        const toHide = [];
+        const toRestore = [];
+
+        const containers = document.querySelectorAll(`[${CONFIG.PROCESSED_ATTR}]`);
+
+        containers.forEach(container => {
+            // Skip excluded types (top hero, single carousel)
+            if (container.matches(EXCLUDED_FROM_FILTER)) {
+                return;
+            }
+
+            const info = extractInfo(container);
+            if (!info.href) return;
+
+            const li = container.closest('li');
+            if (!li) return;
+
+            const cached = state.sessionCache.get(info.href);
+            if (!cached || !cached.rating) {
+                // No rating data - ensure visible
+                if (li.getAttribute(FILTER_ATTR) === 'true') {
+                    toRestore.push(li);
+                }
+                return;
+            }
+
+            const rating = parseFloat(cached.rating);
+            const isCurrentlyHidden = li.getAttribute(FILTER_ATTR) === 'true';
+
+            if (threshold > 0 && rating < threshold) {
+                if (!isCurrentlyHidden) toHide.push(li);
+            } else {
+                if (isCurrentlyHidden) toRestore.push(li);
+            }
+        });
+
+        // Apply all changes in one batch (single repaint)
+        requestAnimationFrame(() => {
+            // Hide items
+            toHide.forEach(li => {
+                li.style.cssText = `
+                    width: 0 !important;
+                    min-width: 0 !important;
+                    max-width: 0 !important;
+                    padding: 0 !important;
+                    margin: 0 !important;
+                    overflow: hidden !important;
+                    opacity: 0;
+                    pointer-events: none;
+                `;
+                li.setAttribute(FILTER_ATTR, 'true');
+            });
+
+            // Restore items
+            toRestore.forEach(li => {
+                li.style.cssText = '';
+                li.removeAttribute(FILTER_ATTR);
+            });
+
+            log(`Filter applied: ${toHide.length} hidden, ${toRestore.length} restored`);
+        });
+    };
+
+    /**
+     * Load threshold from storage on init
+     */
+    const loadThresholdFromStorage = () => {
+        chrome.storage.local.get(['minRatingThreshold'], (result) => {
+            if (result.minRatingThreshold !== undefined) {
+                state.currentThreshold = result.minRatingThreshold;
+                log(`Loaded threshold from storage: ${state.currentThreshold}`);
+            }
+        });
+    };
+
+    /**
+     * Listen for messages from popup
+     */
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.type === 'APPLY_RATING_FILTER') {
+            applyRatingFilter(message.threshold);
+            sendResponse({ success: true });
+        }
+        return true; // Keep channel open for async response
+    });
+
+    // ============================================
     // INIT
     // ============================================
 
     const init = () => {
         log('Initializing Row-Based Batching...');
+        loadThresholdFromStorage();
         setupObservers();
         scan();
     };
