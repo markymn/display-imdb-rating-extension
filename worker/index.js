@@ -129,6 +129,8 @@ async function processMovieLogic(movie, cached, env) {
     // Pre-processing 2: Remove trailing (...) or [...] - PERMANENTLY UPDATE TITLE
     title = title.replace(/\s*(?:\([^)]*\)|\[[^\]]*\])\s*$/, '').trim() || title;
 
+
+
     try {
         let omdbResult = null;
 
@@ -136,8 +138,14 @@ async function processMovieLogic(movie, cached, env) {
         omdbResult = await fetchOMDbTitle(title, null, env.OMDB_API_KEY);
 
         // Validate result: type must match AND rating must not be N/A
-        if (omdbResult && !isValidResult(omdbResult, entityType)) {
-            omdbResult = null;
+        if (omdbResult) {
+            const isValid = isValidResult(omdbResult, entityType);
+            console.log(`[Step 1 Direct] Title: "${title}", Rating: ${omdbResult.imdbRating}, Valid: ${isValid}`);
+            if (!isValid) {
+                omdbResult = null;
+            }
+        } else {
+            console.log(`[Step 1 Direct] Title: "${title}" - Not Found`);
         }
 
         // Step 2: If failed, try replacing & with 'and'
@@ -145,14 +153,39 @@ async function processMovieLogic(movie, cached, env) {
             const altTitle = title.replace(/&/g, ' and ').replace(/\s+/g, ' ').trim();
             omdbResult = await fetchOMDbTitle(altTitle, null, env.OMDB_API_KEY);
 
-            if (omdbResult && !isValidResult(omdbResult, entityType)) {
-                omdbResult = null;
+            if (omdbResult) {
+                const isValid = isValidResult(omdbResult, entityType);
+                console.log(`[Step 2 Ampersand] Title: "${altTitle}", Rating: ${omdbResult.imdbRating}, Valid: ${isValid}`);
+                if (!isValid) {
+                    omdbResult = null;
+                }
             }
         }
 
         // Step 3: Final fallback - OMDb search API using original cleaned title (without & replacement)
         if (!omdbResult) {
+            console.log(`[Step 3 Search] Fallback for Title: "${title}"`);
             omdbResult = await fetchOMDbSearch(title, env.OMDB_API_KEY);
+            if (omdbResult) {
+                console.log(`[Step 3 Search] Found: "${omdbResult.Title}", Rating: ${omdbResult.imdbRating} (No Validation)`);
+            }
+        }
+
+        // Step 4: Special Character Truncation Fallback
+        // If still no result, and title has special chars (-, :, &), truncate and search again
+        if (!omdbResult) {
+            const specialCharMatch = title.match(/[-:&]/);
+            if (specialCharMatch) {
+                const truncatedTitle = title.substring(0, specialCharMatch.index).trim();
+                // Only retry if we have a meaningful title left (e.g., > 2 chars)
+                if (truncatedTitle.length > 2) {
+                    console.log(`[Step 4 Truncate] Searching: "${truncatedTitle}"`);
+                    omdbResult = await fetchOMDbSearch(truncatedTitle, env.OMDB_API_KEY);
+                    if (omdbResult) {
+                        console.log(`[Step 4 Truncate] Found: "${omdbResult.Title}", Rating: ${omdbResult.imdbRating} (No Validation)`);
+                    }
+                }
+            }
         }
 
         if (!omdbResult) return { href, error: 'OMDb Not Found' };
@@ -170,6 +203,7 @@ async function processMovieLogic(movie, cached, env) {
 
         return { href, data: movieData, source: 'api' };
     } catch (e) {
+        console.error(`[Error] processing "${title}":`, e);
         return { href, error: e.message };
     }
 }
@@ -180,6 +214,7 @@ async function processMovieLogic(movie, cached, env) {
 function isValidResult(omdbResult, primeEntityType) {
     // Check rating - must not be N/A
     if (!omdbResult.imdbRating || omdbResult.imdbRating === 'N/A') {
+        console.log(`[Validation Fail] "${omdbResult.Title}" has N/A rating`);
         return false;
     }
 
@@ -189,7 +224,10 @@ function isValidResult(omdbResult, primeEntityType) {
         // Prime: "Movie" -> OMDb: "movie"
         // Prime: "TV Show" -> OMDb: "series"
         const expectedOmdbType = primeEntityType === 'Movie' ? 'movie' : 'series';
-        if (omdbType !== expectedOmdbType) {
+
+        // Loose check: only enforce if both are present
+        if (omdbType && expectedOmdbType && omdbType !== expectedOmdbType) {
+            console.log(`[Validation Fail] Type mismatch. Expected: ${expectedOmdbType}, Got: ${omdbType}`);
             return false;
         }
     }
