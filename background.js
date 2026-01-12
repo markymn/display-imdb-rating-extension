@@ -9,8 +9,8 @@
 
 const WORKER_URL = 'https://imdb-ratings-proxy.markymn-dev.workers.dev';
 
-// Debug mode - ENABLED for troubleshooting
-const DEBUG = true;
+// Debug mode - disable for production
+const DEBUG = false;
 
 /**
  * Debug logging helper

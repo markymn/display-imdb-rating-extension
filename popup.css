@@ -9,21 +9,18 @@
 
 body {
     margin: 0;
-    padding: 16px;
+    padding: 0;
     width: 280px;
-    background-color: var(--bg-color);
+    background-color: var(--card-bg);
+    /* Match background */
     color: var(--text-primary);
     font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     user-select: none;
-    border-radius: 12px;
-    overflow: hidden;
+    overflow-x: hidden;
 }
 
-.container {
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-}
+
+
 
 header h1 {
     font-size: 1.1rem;
@@ -44,10 +41,22 @@ header p {
 }
 
 /* Slider Styling */
+.control-group label {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.slider-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
 input[type="range"] {
     -webkit-appearance: none;
     appearance: none;
-    width: 100%;
+    flex: 1;
     height: 6px;
     background: var(--input-bg);
     border-radius: 3px;
@@ -72,20 +81,15 @@ input[type="range"]::-webkit-slider-thumb:hover {
 }
 
 /* Number Input Styling */
-.input-wrapper {
-    display: flex;
-    justify-content: center;
-}
-
 input[type="number"] {
     background: var(--input-bg);
     border: 1px solid transparent;
     border-radius: 8px;
     color: var(--text-primary);
-    padding: 8px 12px;
-    width: 80px;
+    padding: 6px 0;
+    width: 60px;
     text-align: center;
-    font-size: 1.2rem;
+    font-size: 1rem;
     font-weight: 700;
     outline: none;
     transition: border-color 0.2s;
@@ -95,9 +99,83 @@ input[type="number"]:focus {
     border-color: rgba(255, 255, 255, 0.5);
 }
 
-/* Hide arrow buttons for number input */
+#opacityValue {
+    background: var(--input-bg);
+    color: var(--text-primary);
+    padding: 6px 0;
+    width: 60px;
+    text-align: center;
+    font-size: 1rem;
+    font-weight: 700;
+    border-radius: 8px;
+    display: inline-block;
+}
+
 input::-webkit-outer-spin-button,
 input::-webkit-inner-spin-button {
     -webkit-appearance: none;
     margin: 0;
+}
+
+.container {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding: 20px;
+    /* Removed floating card styles to fill window */
+}
+
+.settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+/* Add separator between sections */
+.settings-section:not(:last-child) {
+    padding-bottom: 20px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Visibility Toggle Styling */
+/* .visibility-group removed */
+
+.checkbox-row {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    background: var(--input-bg);
+    border-radius: 4px;
+    cursor: pointer;
+    position: relative;
+    border: 1px solid transparent;
+}
+
+.checkbox-label input[type="checkbox"]:checked {
+    background: var(--accent-color);
+}
+
+.checkbox-label input[type="checkbox"]:checked::after {
+    content: '✔';
+    position: absolute;
+    color: #000;
+    font-size: 12px;
+    left: 3px;
+    top: 0;
 }

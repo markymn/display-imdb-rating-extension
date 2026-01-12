@@ -11,7 +11,7 @@
     // ============================================
 
     const CONFIG = {
-        DEBUG: true,
+        DEBUG: false,
         DEBOUNCE_DELAY: 500,           // ms to wait before sending batch
         INTERSECTION_THRESHOLD: 0,      // Trigger as soon as it enters the margin
         ROOT_MARGIN: '300px 0px 300px 0px', // Pre-load ratings for rows near viewport
@@ -23,6 +23,10 @@
         if (CONFIG.DEBUG) console.log('[IMDb Prime]', ...args);
     };
 
+    const logError = (...args) => {
+        if (CONFIG.DEBUG) console.error('[IMDb Prime]', ...args);
+    };
+
     // ============================================
     // SELECTORS
     // ============================================
@@ -30,8 +34,11 @@
         THUMBNAIL_CONTAINERS: [
             '[data-testid="top-hero-card"]',
             '[data-testid="single-item-carousel"]',
+            '[data-testid="intermission-hero-card"]',
             '[data-testid="card"]',
-            '.DVWebNode-detail-container',
+            '[data-testid="product-details-hero"]', // NEW: Detail Page Hero
+            '[data-testid="detail-hero"]', // NEW: Alternate Detail Hero
+            '.dv-node-dp-container',
             '.tst-title-card',
             '.av-hover-wrapper',
             '.pv-detail-container',
@@ -42,6 +49,8 @@
         ].join(', '),
 
         TITLE_ELEMENTS: [
+            '[data-automation-id="title"]',
+            'h1',
             '[data-testid="card-title"]',
             '.av-het-title',
             '[class*="Title"]',
@@ -59,9 +68,13 @@
         CAROUSEL_WRAPPERS: [
             '[data-testid="navigation-carousel-wrapper"]',
             '[data-testid="super-carousel-card"]',
+            '[data-testid="intermission-hero"]',
             '.tst-ordered-collection'
         ].join(', ')
     };
+
+    const EXCLUDED_FROM_FILTER = '[data-testid="top-hero-card"], [data-testid="single-item-carousel"], [data-testid="intermission-hero-card"]';
+    const FILTER_ATTR = 'data-pv-hidden';
 
     // ============================================
     // STATE
@@ -72,107 +85,342 @@
         processedItems: new Set(), // Track individual movie hrefs/IDs
         rowObservers: new Map(), // Map<RowElement, MutationObserver>
         sessionCache: new Map(), // Map<href, data> - Client side cache
+        pendingContainers: new Map(), // Map<href, Set<Container>> - For items waiting on inflight requests
         processingTimeout: null,
-        currentThreshold: 0.0, // Current minimum rating filter threshold
+
+        // Filtering & Visibility State
+        currentThreshold: 0.0, // Min IMDb
+        currentRtThreshold: 0, // Min RT
+        currentOpacity: 0,
+        currentScale: 1.0,
+        showImdb: true,
+        showRt: true
     };
 
     // ============================================
-    // EXCLUDED SELECTORS (items that should NOT be filtered)
-    // ============================================
-    const EXCLUDED_FROM_FILTER = '[data-testid="top-hero-card"], [data-testid="single-item-carousel"]';
-
-    // ============================================
-    // CORE LOGIC
+    // HELPERS & EXTRACTION
     // ============================================
 
-    /**
-     * calculateBatchSize: Determines batch size based on items visible in a row
-     */
-    const calculateBatchSize = (row) => {
-        // Enforce batch size 1 for specific hero types as requested
-        if (row.matches('[data-testid="top-hero-card"], [data-testid="single-item-carousel"]')) {
-            return 1;
+    const cleanTitle = (text) => {
+        if (!text) return '';
+        const cleaned = text
+            .replace(/^Watch\s+/i, '')
+            .replace(/\s*\(\d{4}\)\s*$/, '') // Remove Year
+            .replace(/\s*-?\s*Prime Video\s*$/i, '')
+            .replace(/\s*(?:-|:)?\s*Season\s+\d+.*/i, '') // Remove Season info
+            .replace(/\s*(?:-|:)?\s*S\d{1,2}$/i, '') // Remove S1, S02 etc
+            .trim();
+        return cleaned;
+    };
+
+    const cleanHref = (href) => {
+        if (!href) return null;
+        // Common patterns for Prime Video / Amazon URLs
+        const patterns = [
+            /\/detail\/[A-Za-z0-9]+/,
+            /\/gp\/video\/detail\/[A-Za-z0-9]+/,
+            /\/dp\/[A-Za-z0-9]+/
+        ];
+
+        for (const pattern of patterns) {
+            const match = href.match(pattern);
+            if (match) return match[0];
+        }
+        return href.split('?')[0].split('/ref=')[0];
+    };
+
+    const extractInfo = (container) => {
+        if (container.matches('[data-testid="atf-component"]')) {
+            log('Extracting Info for Main Component...');
+        }
+        // 1. Title
+        let title = null;
+        const packshotBtn = container.querySelector('[data-testid="packshot"] button[aria-label]');
+        if (packshotBtn) {
+            title = packshotBtn.getAttribute('aria-label');
         }
 
+        if (!title) {
+            for (const selector of SELECTORS.TITLE_ELEMENTS) {
+                const el = container.querySelector(selector);
+                if (el) {
+                    // Try text content first
+                    title = el.textContent.trim();
+
+                    // IF empty, try alt or aria-label on element itself
+                    if (!title) {
+                        title = el.getAttribute('alt') || el.getAttribute('aria-label');
+                    }
+
+                    // IF STILL empty, look for an image inside (e.g. H1 > Div > Picture > Img)
+                    if (!title) {
+                        const img = el.querySelector('img');
+                        if (img) title = img.getAttribute('alt');
+                    }
+
+                    if (title) {
+                        if (title.startsWith('Title number') && container.matches('[data-testid="single-item-carousel"]')) {
+                            title = null;
+                        } else {
+                            break; // Found it
+                        }
+                    }
+                }
+            }
+        }
+        title = cleanTitle(title);
+
+        // 2. Href
+        let href = null;
+
+        // Critical Fix for Detail Pages:
+        // If this container holds the "Prime's Native IMDb Badge", it IS the main entity of the detail page.
+        // We must ignore any other links inside (which might point to seasons, episodes, or recommendations)
+        // and strictly use the current window URL data.
+        const nativeBadge = container.querySelector('[data-automation-id="imdb-rating-badge"]');
+        const isDetailPage = window.location.href.includes('/detail/') || window.location.href.includes('/gp/video/detail/') || window.location.href.includes('/dp/');
+
+        if (isDetailPage && nativeBadge) {
+            // Force the Href to be the current page
+            href = window.location.href;
+            log('Identified Main Detail Hero via Native Badge, forcing HREF:', href);
+        } else {
+            // Standard Extraction
+            const actionLink = container.querySelector('[data-testid="details-cta"]');
+            if (actionLink) {
+                href = actionLink.getAttribute('href');
+            }
+
+            if (!href) {
+                if (container.tagName === 'A') {
+                    href = container.getAttribute('href');
+                } else {
+                    const link = container.querySelector('a[href*="/detail/"], a[href*="title"]');
+                    if (link) href = link.getAttribute('href');
+                }
+            }
+        }
+
+        if (href) href = cleanHref(href);
+
+        // 3. Entity Type
+        const entityType = container.getAttribute('data-card-entity-type') || null;
+
+        // 4. Verification Data
+        let verificationRating = null;
+
+        // If we found the native badge earlier (or if we just checked link match)
+        if (nativeBadge) {
+            const match = nativeBadge.textContent.match(/(\d+(?:\.\d+)?)/);
+            if (match) verificationRating = match[1];
+        }
+
+        // Final sanity check for verification (only valid if we are actually ON that page)
+        // If we forced href above, this is guaranteed true.
+        // If we didn't force it (e.g. valid link found elsewhere), we still check match.
+        const currentUrl = window.location.href;
+        if (href && currentUrl.includes(href)) {
+            if (verificationRating) log('Verification Logic Active for:', title, 'Rating:', verificationRating);
+        } else {
+            // If mismatched, discard verification rating to prevent false positives?
+            // Actually, if we scraped 'verificationRating' from 'nativeBadge' inside THIS container,
+            // but the 'term' href derived from link logic points elsewhere...
+            // THEN we have the "Main Hero" problem again.
+            // BUT, the 'if (isDetailPage && nativeBadge)' block above handles this priority.
+            // So if we are here, we are either:
+            // A) Main Hero (Handled)
+            // B) Some other card that happens to have a rating badge? (Unlikely)
+            // C) Standard card
+
+            if (verificationRating && (!href || !currentUrl.includes(href))) {
+                // We found a rating badge but the link points elsewhere? 
+                // This implies we scraped the Main Page badge but assigned it to a sub-element?
+                // Safer to nullify verification if href mismatches.
+                verificationRating = null;
+            }
+        }
+
+        return { title, href, entityType, verificationRating };
+    };
+
+    const calculateBatchSize = (row) => {
+        if (row.matches('[data-testid="top-hero-card"], [data-testid="single-item-carousel"], [data-testid="intermission-hero-card"]')) {
+            return 1;
+        }
         const rowWidth = row.offsetWidth;
         const firstItem = row.querySelector(SELECTORS.THUMBNAIL_CONTAINERS);
-        if (!firstItem) return 10; // Default fallback
+        if (!firstItem) return 10;
 
         const itemWidth = firstItem.offsetWidth;
         if (itemWidth === 0) return 10;
 
         const visibleCount = Math.floor(rowWidth / itemWidth);
-        return Math.max(visibleCount * 2, 4); // 2x visible items, minimum of 4
+        return Math.max(visibleCount * 2, 4);
     };
 
-    /**
-     * processRowItems: Collects and batches new items in a row
-     */
-    const processRowItems = (row) => {
-        const batchSize = calculateBatchSize(row);
+    // ============================================
+    // FILTER LOGIC
+    // ============================================
 
-        // Collect items to process: the row itself if it's a thumbnail, plus any matching children
-        const items = [];
-        if (row.matches(SELECTORS.THUMBNAIL_CONTAINERS)) {
-            items.push(row);
+    const hideCard = (container) => {
+        const li = container.closest('li');
+        if (li && li.getAttribute(FILTER_ATTR) !== 'true') {
+            li.style.transition = 'opacity 0.3s ease';
+            li.style.opacity = (state.currentOpacity / 100).toString();
+            li.style.pointerEvents = 'none';
+            li.setAttribute(FILTER_ATTR, 'true');
+        } else if (li && li.getAttribute(FILTER_ATTR) === 'true') {
+            li.style.opacity = (state.currentOpacity / 100).toString();
+        }
+    };
+
+    const restoreCard = (container) => {
+        const li = container.closest('li');
+        if (li && li.getAttribute(FILTER_ATTR) === 'true') {
+            li.style.opacity = '';
+            li.style.pointerEvents = '';
+            li.removeAttribute(FILTER_ATTR);
+        }
+    };
+
+    const checkAndHideCard = (container, rating, rtRating) => {
+        if (container.matches(EXCLUDED_FROM_FILTER)) return;
+
+        const imdbVal = parseFloat(rating) || 0;
+        let rtVal = 0;
+        if (rtRating) {
+            rtVal = parseInt(rtRating.replace('%', '')) || 0;
         }
 
-        // Use querySelectorAll to find all nested thumbnails, then filter out duplicates (only direct or relevant ones)
-        // We use a Set to ensure we don't process the same element twice if row.matches(container)
-        const allFound = Array.from(row.querySelectorAll(SELECTORS.THUMBNAIL_CONTAINERS));
-        const uniqueItems = [row.matches(SELECTORS.THUMBNAIL_CONTAINERS) ? row : null, ...allFound]
-            .filter((el, index, self) => el && self.indexOf(el) === index);
+        let shouldHide = false;
 
-        let currentBatch = [];
+        // IMDb Filter: Hide if rating exists and is below threshold
+        if (state.currentThreshold > 0 && imdbVal > 0 && imdbVal < state.currentThreshold) {
+            shouldHide = true;
+        }
 
-        for (const item of uniqueItems) {
-            if (item.hasAttribute(CONFIG.PROCESSED_ATTR)) continue;
+        // RT Filter: Hide if RT rating exists and is below threshold
+        // Note: We only filter by RT if RT rating actually exists.
+        if (!shouldHide && state.currentRtThreshold > 0 && rtRating && rtVal < state.currentRtThreshold) {
+            shouldHide = true;
+        }
 
-            const info = extractInfo(item);
-            if (!info || !info.href) continue;
+        if (shouldHide) {
+            hideCard(container);
+        } else {
+            restoreCard(container);
+        }
+    };
 
-            // Check if already processed globally
-            if (state.processedItems.has(info.href)) {
-                const cached = state.sessionCache.get(info.href);
-                if (cached) {
-                    injectBadge(item, cached.rating, cached.votes);
-                    item.setAttribute(CONFIG.PROCESSED_ATTR, 'cache-hit');
+    // ============================================
+    // UI INJECTION
+    // ============================================
+
+    const createBadge = (type, value, votes) => {
+        const badge = document.createElement('div');
+
+        if (type === 'imdb') {
+            badge.className = 'imdb-rating-badge';
+            const numRating = parseFloat(value);
+            const formattedRating = (!numRating || numRating === 0) ? 'N/A' : numRating.toFixed(1);
+            badge.innerHTML = `<span class="imdb-rating-star">★</span> <span class="imdb-rating-value">${formattedRating}</span>`;
+            if (votes) badge.title = `${votes} votes`;
+        } else if (type === 'rt') {
+            badge.className = 'rt-rating-badge';
+            badge.innerHTML = `<span class="rt-icon"></span> <span class="rt-rating-value">${value}</span>`;
+            badge.title = 'RT';
+        }
+        return badge;
+    };
+
+    const injectBadge = (container, rating, votes, rtRating) => {
+        let target;
+        if (container.matches('[data-testid="top-hero-card"], [data-testid="single-item-carousel"], [data-testid="intermission-hero-card"]')) {
+            target = container.querySelector('[data-testid="title-metadata-main"]');
+        }
+
+        if (!target) {
+            target = container.querySelector('[data-testid="packshot"]') ||
+                container.querySelector('[data-testid="poster-link"] .om7nme') ||
+                container.querySelector('.om7nme') ||
+                container;
+        }
+
+        if (target && target.tagName === 'IMG') target = target.parentElement;
+        if (!target) return;
+
+        if (window.getComputedStyle(target).position === 'static') {
+            target.style.position = 'relative';
+        }
+
+        if (target.querySelector('.badge-container')) return;
+        if (target.querySelector('.imdb-rating-badge')) return;
+
+        checkAndHideCard(container, rating, rtRating);
+
+        const badgeContainer = document.createElement('div');
+        badgeContainer.className = 'badge-container';
+
+        // Apply Scale
+        if (state.currentScale !== 1) {
+            badgeContainer.style.zoom = state.currentScale;
+        }
+
+        if (state.showImdb) {
+            const imdbBadge = createBadge('imdb', rating, votes);
+            badgeContainer.appendChild(imdbBadge);
+        }
+
+        if (state.showRt && rtRating) {
+            const rtBadge = createBadge('rt', rtRating);
+            badgeContainer.appendChild(rtBadge);
+        }
+
+        // Only append if we added at least one badge
+        if (badgeContainer.children.length > 0) {
+            if (target.getAttribute('data-testid') === 'title-metadata-main') {
+                target.prepend(badgeContainer);
+            } else {
+                target.appendChild(badgeContainer);
+            }
+        }
+    };
+
+    // ============================================
+    // BATCH & PROCESS LOGIC
+    // ============================================
+
+    const handleBatchResponse = (results) => {
+        results.forEach(item => {
+            const containers = state.pendingContainers.get(item.href);
+            if (!containers) return;
+
+            containers.forEach(container => {
+                if (item.data) {
+                    injectBadge(container, item.data.rating, item.data.votes, item.data.rt_rating);
+                    container.setAttribute(CONFIG.PROCESSED_ATTR, 'success');
+                    state.sessionCache.set(item.href, item.data);
+                } else {
+                    container.setAttribute(CONFIG.PROCESSED_ATTR, 'no-data');
                 }
-                continue;
-            }
-
-            currentBatch.push({ container: item, info });
-
-            // If we hit the batch size (or if this item itself requires immediate batching)
-            if (currentBatch.length >= batchSize) {
-                sendBatch(currentBatch);
-                currentBatch = [];
-            }
-        }
-
-        if (currentBatch.length > 0) {
-            sendBatch(currentBatch);
-        }
+            });
+            state.pendingContainers.delete(item.href);
+        });
     };
 
-    /**
-     * sendBatch: Sends a prepared batch of items to the worker
-     */
     const sendBatch = async (batch) => {
         const payload = batch.map(item => ({
             title: item.info.title,
             href: item.info.href,
-            entityType: item.info.entityType
+            entityType: item.info.entityType,
+            verificationRating: item.info.verificationRating
         }));
 
-        const containerMap = new Map();
         batch.forEach(item => {
-            if (!containerMap.has(item.info.href)) {
-                containerMap.set(item.info.href, []);
+            if (!state.pendingContainers.has(item.info.href)) {
+                state.pendingContainers.set(item.info.href, new Set());
             }
-            containerMap.get(item.info.href).push(item.container);
-
-            // Mark as pending and add to processed set immediately to prevent double-queueing
+            state.pendingContainers.get(item.info.href).add(item.container);
             item.container.setAttribute(CONFIG.PROCESSED_ATTR, 'pending');
             state.processedItems.add(item.info.href);
         });
@@ -189,226 +437,150 @@
                 }, (response) => {
                     if (response && response.success && response.results) {
                         log(`Received ${response.results.length} results for chunk.`);
-                        handleBatchResponse(response.results, containerMap);
+                        handleBatchResponse(response.results);
                     } else if (response && response.error) {
                         logError('Batch chunk failed:', response.error);
-                        // Optional: clear processed status to allow retry on next scroll/scan
                         chunk.forEach(item => {
-                            const containers = containerMap.get(item.href);
-                            containers?.forEach(c => c.removeAttribute(CONFIG.PROCESSED_ATTR));
+                            const pending = state.pendingContainers.get(item.href);
+                            if (pending) {
+                                pending.forEach(c => c.removeAttribute(CONFIG.PROCESSED_ATTR));
+                                state.pendingContainers.delete(item.href);
+                            }
                             state.processedItems.delete(item.href);
                         });
                     }
                 });
             } catch (error) {
-                if (error.message.includes('Extension context invalidated')) {
-                    log('Extension context invalidated (extension updated/reloaded). Stopping further processing.');
-                    // Disconnect observers to stop processing
-                    if (state.observer) state.observer.disconnect();
-                    if (state.intersectionObserver) state.intersectionObserver.disconnect();
-                    state.rowObservers.forEach(obs => obs.disconnect());
-                } else {
-                    logError('Runtime message error:', error);
-                }
+                // Ignore
             }
         }
     };
 
-    const logError = (...args) => {
-        console.error('[IMDb Prime ERROR]', ...args);
-    };
+    const processRowItems = (row) => {
+        const batchSize = calculateBatchSize(row);
+        const allFound = Array.from(row.querySelectorAll(SELECTORS.THUMBNAIL_CONTAINERS));
+        const uniqueItems = [row.matches(SELECTORS.THUMBNAIL_CONTAINERS) ? row : null, ...allFound]
+            .filter((el, index, self) => el && self.indexOf(el) === index);
 
+        let currentBatch = [];
 
-    const handleBatchResponse = (results, containerMap) => {
-        results.forEach(item => {
-            const containers = containerMap.get(item.href);
-            if (!containers) return;
+        for (const item of uniqueItems) {
+            if (item.hasAttribute(CONFIG.PROCESSED_ATTR)) continue;
 
-            containers.forEach(container => {
-                if (item.data) {
-                    injectBadge(container, item.data.rating, item.data.votes);
-                    container.setAttribute(CONFIG.PROCESSED_ATTR, 'success');
-                    state.sessionCache.set(item.href, item.data);
+            const info = extractInfo(item);
+            if (!info || !info.href) continue;
+
+            if (state.processedItems.has(info.href)) {
+                const cached = state.sessionCache.get(info.href);
+                if (cached) {
+                    injectBadge(item, cached.rating, cached.votes, cached.rt_rating);
+                    item.setAttribute(CONFIG.PROCESSED_ATTR, 'cache-hit');
                 } else {
-                    container.setAttribute(CONFIG.PROCESSED_ATTR, 'no-data');
+                    if (!state.pendingContainers.has(info.href)) {
+                        state.pendingContainers.set(info.href, new Set());
+                    }
+                    state.pendingContainers.get(info.href).add(item);
+                    item.setAttribute(CONFIG.PROCESSED_ATTR, 'pending-queue');
                 }
-            });
-        });
+                continue;
+            }
+
+            currentBatch.push({ container: item, info });
+
+            if (currentBatch.length >= batchSize) {
+                sendBatch(currentBatch);
+                currentBatch = [];
+            }
+        }
+
+        if (currentBatch.length > 0) {
+            sendBatch(currentBatch);
+        }
     };
 
-    /**
-     * Queue a single thumbnail (fallback for non-row items)
-     */
     const queueThumbnail = (container) => {
         if (container.hasAttribute(CONFIG.PROCESSED_ATTR)) return;
-
         const info = extractInfo(container);
         if (!info || !info.href) return;
 
         if (state.processedItems.has(info.href)) {
             const cached = state.sessionCache.get(info.href);
             if (cached) {
-                injectBadge(container, cached.rating, cached.votes);
+                injectBadge(container, cached.rating, cached.votes, cached.rt_rating);
                 container.setAttribute(CONFIG.PROCESSED_ATTR, 'cache-hit');
+            } else {
+                if (!state.pendingContainers.has(info.href)) {
+                    state.pendingContainers.set(info.href, new Set());
+                }
+                state.pendingContainers.get(info.href).add(container);
+                container.setAttribute(CONFIG.PROCESSED_ATTR, 'pending-queue');
             }
             return;
         }
-
-        // Send a single item batch
         sendBatch([{ container, info }]);
     };
 
-    /**
-     * Extract Title and Href
-     */
-    const extractInfo = (container) => {
-        // 1. Title
-        let title = container.getAttribute('data-card-title');
-        if (!title) {
-            // Fallback: Check inner elements
-            for (const selector of SELECTORS.TITLE_ELEMENTS) {
-                const el = container.querySelector(selector);
-                if (el) {
-                    title = el.textContent || el.getAttribute('alt') || el.getAttribute('aria-label');
-                    if (title) {
-                        // If it's a placeholder title, we'd rather have no title than a bad one for hero types
-                        if (title.startsWith('Title number') && container.matches('[data-testid="single-item-carousel"]')) {
-                            title = null;
-                        }
-                        break;
-                    }
-                }
+    // ============================================
+    // DYNAMIC UPDATES LOGIC
+    // ============================================
+
+    const reapplyAllFilters = () => {
+        log(`Re-applying filters: IMDb>${state.currentThreshold}, RT>${state.currentRtThreshold}, Opacity=${state.currentOpacity}`);
+
+        const containers = document.querySelectorAll(`[${CONFIG.PROCESSED_ATTR}]`);
+        const toHide = [];
+        const toRestore = [];
+
+        containers.forEach(container => {
+            const info = extractInfo(container);
+            if (!info.href) return;
+
+            const cached = state.sessionCache.get(info.href);
+            if (!cached) return;
+
+            const li = container.closest('li');
+            if (!li) return;
+
+            const imdbVal = parseFloat(cached.rating) || 0;
+            let rtVal = 0;
+            if (cached.rt_rating) {
+                rtVal = parseInt(cached.rt_rating.replace('%', '')) || 0;
             }
-        }
-        title = cleanTitle(title);
 
-        // 2. Href (Critical for new architecture)
-        let href = null;
+            let shouldHide = false;
+            if (state.currentThreshold > 0 && imdbVal > 0 && imdbVal < state.currentThreshold) shouldHide = true;
+            if (!shouldHide && state.currentRtThreshold > 0 && cached.rt_rating && rtVal < state.currentRtThreshold) shouldHide = true;
 
-        // Priority for Hero/Carousel: The "More details" link in action-box is very reliable
-        const actionLink = container.querySelector('[data-testid="details-cta"]');
-        if (actionLink) {
-            href = actionLink.getAttribute('href');
-        }
+            const isHidden = li.getAttribute(FILTER_ATTR) === 'true';
 
-        if (!href) {
-            // Check container itself if it's an anchor
-            if (container.tagName === 'A') {
-                href = container.getAttribute('href');
+            if (shouldHide) {
+                if (!isHidden || li.style.opacity != (state.currentOpacity / 100)) toHide.push(li);
             } else {
-                // Look for link inside
-                const link = container.querySelector('a[href*="/detail/"], a[href*="title"]'); // Broaden selector
-                if (link) href = link.getAttribute('href');
+                if (isHidden) toRestore.push(li);
             }
-        }
+        });
 
-        if (href) {
-            href = cleanHref(href);
-        }
-
-        // 3. Entity Type (Movie or TV Show)
-        const entityType = container.getAttribute('data-card-entity-type') || null;
-
-        return { title, href, entityType };
+        requestAnimationFrame(() => {
+            toHide.forEach(li => {
+                li.style.transition = 'opacity 0.3s ease';
+                li.style.opacity = (state.currentOpacity / 100).toString();
+                li.style.pointerEvents = 'none';
+                li.setAttribute(FILTER_ATTR, 'true');
+            });
+            toRestore.forEach(li => {
+                li.style.opacity = '';
+                li.style.pointerEvents = '';
+                li.removeAttribute(FILTER_ATTR);
+            });
+        });
     };
 
-    const cleanTitle = (text) => {
-        if (!text) return '';
-        const original = text;
-        const cleaned = text
-            .replace(/^Watch\s+/i, '')
-            .replace(/\s*\(\d{4}\)\s*$/, '') // Remove Year
-            .replace(/\s*-?\s*Prime Video\s*$/i, '')
-            .replace(/\s*(?:-|:)?\s*Season\s+\d+.*/i, '') // Remove Season info
-            .trim();
-        return cleaned;
-    };
+    const updateBadgeVisibility = () => {
+        const imdbBadges = document.querySelectorAll('.imdb-rating-badge');
+        imdbBadges.forEach(b => b.style.display = state.showImdb ? '' : 'none');
 
-    const cleanHref = (href) => {
-        if (!href) return null;
-
-        // Common patterns for Prime Video / Amazon URLs
-        // We want to extract just the relevant path segment (e.g., /detail/ID)
-        const patterns = [
-            /\/detail\/[A-Za-z0-9]+/,
-            /\/gp\/video\/detail\/[A-Za-z0-9]+/,
-            /\/dp\/[A-Za-z0-9]+/
-        ];
-
-        for (const pattern of patterns) {
-            const match = href.match(pattern);
-            if (match) return match[0];
-        }
-
-        // Fallback: simple cleanup if no pattern matches
-        return href.split('?')[0].split('/ref=')[0];
-    };
-
-    // ============================================
-    // UI INJECTION
-    // ============================================
-
-    const createBadge = (rating, votes) => {
-        const badge = document.createElement('div');
-        badge.className = 'imdb-rating-badge';
-        // Ensure rating is always X.Y (e.g. 7 -> 7.0)
-        const formattedRating = parseFloat(rating).toFixed(1);
-        badge.innerHTML = `<span class="imdb-rating-star">★</span> <span class="imdb-rating-value">${formattedRating}</span>`;
-        if (votes) badge.title = `${votes} votes`;
-        return badge;
-    };
-
-    const injectBadge = (container, rating, votes) => {
-        // Find best position (usually top-left of image)
-        // Find best position
-        // 1. Standard packshot
-        // 2. Poster link image container (Super Carousel)
-        // 3. Generic aspect ratio box (Fallback)
-        // 4. Container itself
-        let target;
-
-        // Special checking for Top Hero Card or Single Item Carousel
-        if (container.matches('[data-testid="top-hero-card"], [data-testid="single-item-carousel"]')) {
-            target = container.querySelector('[data-testid="title-metadata-main"]');
-        }
-
-        if (!target) {
-            target = container.querySelector('[data-testid="packshot"]') ||
-                container.querySelector('[data-testid="poster-link"] .om7nme') ||
-                container.querySelector('.om7nme') ||
-                container;
-        }
-
-        // If target is the image itself (fallback), go to parent
-        if (target.tagName === 'IMG') target = target.parentElement;
-
-        // Check valid positioning
-        if (window.getComputedStyle(target).position === 'static') {
-            target.style.position = 'relative';
-        }
-
-        // Check if badge already exists
-        if (target.querySelector('.imdb-rating-badge')) {
-            log('Badge already exists, skipping.');
-            return;
-        }
-
-        // Apply filter BEFORE showing badge if threshold is set
-        // Skip excluded types (top hero, single carousel)
-        if (state.currentThreshold > 0 && !container.matches(EXCLUDED_FROM_FILTER)) {
-            const ratingNum = parseFloat(rating);
-            if (ratingNum < state.currentThreshold) {
-                // Hide immediately - badge still injected but parent <li> is collapsed
-                hideCard(container);
-            }
-        }
-
-        const badge = createBadge(rating, votes);
-        if (target.getAttribute('data-testid') === 'title-metadata-main') {
-            target.prepend(badge);
-        } else {
-            target.appendChild(badge);
-        }
+        const rtBadges = document.querySelectorAll('.rt-rating-badge');
+        rtBadges.forEach(b => b.style.display = state.showRt ? '' : 'none');
     };
 
     // ============================================
@@ -416,18 +588,11 @@
     // ============================================
 
     const setupObservers = () => {
-        // 1. Intersection Observer for Rows
         state.intersectionObserver = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
                 const row = entry.target;
-
                 if (entry.isIntersecting) {
-                    log('Row entered viewport context:', row);
-
-                    // a. Process existing items
                     processRowItems(row);
-
-                    // b. Setup MutationObserver for this row to catch lazy-loaded items
                     if (!state.rowObservers.has(row)) {
                         const observer = new MutationObserver((mutations) => {
                             let hasNewItems = false;
@@ -445,17 +610,12 @@
                                 }
                                 if (hasNewItems) break;
                             }
-                            if (hasNewItems) {
-                                log('New items detected in row via mutation:', row);
-                                processRowItems(row);
-                            }
+                            if (hasNewItems) processRowItems(row);
                         });
-
                         observer.observe(row, { childList: true, subtree: true });
                         state.rowObservers.set(row, observer);
                     }
                 } else {
-                    // Clean up observer if it leaves the margin (optional, but good for performance)
                     const observer = state.rowObservers.get(row);
                     if (observer) {
                         observer.disconnect();
@@ -468,7 +628,6 @@
             rootMargin: CONFIG.ROOT_MARGIN
         });
 
-        // 2. Global Mutation Observer for new Rows
         state.observer = new MutationObserver((mutations) => {
             let added = false;
             mutations.forEach(m => {
@@ -476,172 +635,70 @@
             });
             if (added) scan();
         });
-
         state.observer.observe(document.body, { childList: true, subtree: true });
     };
 
     const scan = () => {
-        // 1. Observe Row Wrappers (Priority)
+        log('Scanning page for containers...');
         const wrappers = document.querySelectorAll(SELECTORS.CAROUSEL_WRAPPERS);
-        wrappers.forEach(wrapper => {
-            state.intersectionObserver.observe(wrapper);
-        });
+        wrappers.forEach(wrapper => state.intersectionObserver.observe(wrapper));
 
-        // 2. Process Individual Containers that aren't in a recognized wrapper
         const containers = document.querySelectorAll(SELECTORS.THUMBNAIL_CONTAINERS);
+        log(`Found ${containers.length} potential movie containers.`);
         containers.forEach(container => {
             if (container.hasAttribute(CONFIG.PROCESSED_ATTR)) return;
-
             const parentRow = container.closest(SELECTORS.CAROUSEL_WRAPPERS);
-            if (!parentRow) {
-                // If it's not in a row, use standard individual intersection logic
-                state.intersectionObserver.observe(container);
-            }
+            if (!parentRow) state.intersectionObserver.observe(container);
         });
     };
-
-    // ============================================
-    // RATING FILTER (Prime-Safe Hybrid Hide)
-    // ============================================
-
-    const FILTER_ATTR = 'data-pv-hidden';
-
-    /**
-     * Hide a card by collapsing its parent <li> layout slot to zero width
-     * Uses zero-width collapse instead of display:none to preserve Prime's
-     * carousel navigation (arrow keys rely on DOM elements being "present")
-     */
-    const hideCard = (container) => {
-        const li = container.closest('li');
-        if (li && li.getAttribute(FILTER_ATTR) !== 'true') {
-            // Collapse to zero width while keeping in DOM for navigation
-            li.style.cssText = `
-                width: 0 !important;
-                min-width: 0 !important;
-                max-width: 0 !important;
-                padding: 0 !important;
-                margin: 0 !important;
-                overflow: hidden !important;
-                opacity: 0;
-                pointer-events: none;
-            `;
-            li.setAttribute(FILTER_ATTR, 'true');
-        }
-    };
-
-    /**
-     * Restore a hidden card by clearing inline styles from parent <li>
-     */
-    const restoreCard = (container) => {
-        const li = container.closest('li');
-        if (li && li.getAttribute(FILTER_ATTR) === 'true') {
-            li.style.cssText = '';
-            li.removeAttribute(FILTER_ATTR);
-        }
-    };
-
-    /**
-     * Apply rating filter to all processed items
-     * Uses batched DOM updates for instant filtering without visible 1-by-1 effect
-     */
-    const applyRatingFilter = (threshold) => {
-        state.currentThreshold = threshold;
-        log(`Applying rating filter: hiding items below ${threshold}`);
-
-        // Collect all changes first (no DOM modifications yet)
-        const toHide = [];
-        const toRestore = [];
-
-        const containers = document.querySelectorAll(`[${CONFIG.PROCESSED_ATTR}]`);
-
-        containers.forEach(container => {
-            // Skip excluded types (top hero, single carousel)
-            if (container.matches(EXCLUDED_FROM_FILTER)) {
-                return;
-            }
-
-            const info = extractInfo(container);
-            if (!info.href) return;
-
-            const li = container.closest('li');
-            if (!li) return;
-
-            const cached = state.sessionCache.get(info.href);
-            if (!cached || !cached.rating) {
-                // No rating data - ensure visible
-                if (li.getAttribute(FILTER_ATTR) === 'true') {
-                    toRestore.push(li);
-                }
-                return;
-            }
-
-            const rating = parseFloat(cached.rating);
-            const isCurrentlyHidden = li.getAttribute(FILTER_ATTR) === 'true';
-
-            if (threshold > 0 && rating < threshold) {
-                if (!isCurrentlyHidden) toHide.push(li);
-            } else {
-                if (isCurrentlyHidden) toRestore.push(li);
-            }
-        });
-
-        // Apply all changes in one batch (single repaint)
-        requestAnimationFrame(() => {
-            // Hide items
-            toHide.forEach(li => {
-                li.style.cssText = `
-                    width: 0 !important;
-                    min-width: 0 !important;
-                    max-width: 0 !important;
-                    padding: 0 !important;
-                    margin: 0 !important;
-                    overflow: hidden !important;
-                    opacity: 0;
-                    pointer-events: none;
-                `;
-                li.setAttribute(FILTER_ATTR, 'true');
-            });
-
-            // Restore items
-            toRestore.forEach(li => {
-                li.style.cssText = '';
-                li.removeAttribute(FILTER_ATTR);
-            });
-
-            log(`Filter applied: ${toHide.length} hidden, ${toRestore.length} restored`);
-        });
-    };
-
-    /**
-     * Load threshold from storage on init
-     */
-    const loadThresholdFromStorage = () => {
-        chrome.storage.local.get(['minRatingThreshold'], (result) => {
-            if (result.minRatingThreshold !== undefined) {
-                state.currentThreshold = result.minRatingThreshold;
-                log(`Loaded threshold from storage: ${state.currentThreshold}`);
-            }
-        });
-    };
-
-    /**
-     * Listen for messages from popup
-     */
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        if (message.type === 'APPLY_RATING_FILTER') {
-            applyRatingFilter(message.threshold);
-            sendResponse({ success: true });
-        }
-        return true; // Keep channel open for async response
-    });
 
     // ============================================
     // INIT
     // ============================================
 
+    const updateBadgeScale = () => {
+        const badges = document.querySelectorAll('.badge-container');
+        badges.forEach(b => {
+            b.style.zoom = state.currentScale;
+        });
+    };
+
+    const loadSettings = () => {
+        chrome.storage.local.get(['minRatingThreshold', 'minRtThreshold', 'ghostOpacity', 'badgeScale', 'showImdb', 'showRt'], (result) => {
+            if (result.minRatingThreshold !== undefined) state.currentThreshold = result.minRatingThreshold;
+            if (result.minRtThreshold !== undefined) state.currentRtThreshold = result.minRtThreshold;
+            if (result.ghostOpacity !== undefined) state.currentOpacity = result.ghostOpacity;
+            if (result.badgeScale !== undefined) state.currentScale = result.badgeScale;
+
+            if (result.showImdb !== undefined) state.showImdb = result.showImdb;
+            if (result.showRt !== undefined) state.showRt = result.showRt;
+
+            log(`Loaded settings: IMDb>${state.currentThreshold}, RT>${state.currentRtThreshold}, Opacity=${state.currentOpacity}, Scale=${state.currentScale}`);
+        });
+    };
+
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.type === 'APPLY_SETTINGS') {
+            const s = message.settings;
+            state.currentThreshold = s.minRating;
+            state.currentRtThreshold = s.minRt;
+            state.currentOpacity = s.opacity;
+            state.currentScale = s.scale;
+            state.showImdb = s.showImdb;
+            state.showRt = s.showRt;
+
+            reapplyAllFilters();
+            updateBadgeVisibility();
+            updateBadgeScale();
+
+            sendResponse({ success: true });
+        }
+        return true;
+    });
+
     const init = () => {
         log('Initializing Row-Based Batching...');
-        loadThresholdFromStorage();
+        loadSettings();
         setupObservers();
         scan();
     };

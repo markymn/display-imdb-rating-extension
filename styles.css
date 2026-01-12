@@ -20,12 +20,7 @@
 
   min-width: 60px;
   padding: 4px 6px;
-  /* Minimal padding for flush corner */
   border-radius: 8px 0 8px 0;
-  margin: 0 !important;
-  /* Ensure it sits strictly in the corner, compensating for any parent border/padding */
-  /* Clean corner fit */
-  box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
 
   /* Opaque dark background */
   background: linear-gradient(135deg,
@@ -208,4 +203,113 @@
   .imdb-rating-badge {
     display: none !important;
   }
+}
+
+/* ==========================================================================
+   Rotten Tomatoes Support
+   ========================================================================== */
+
+.rt-rating-badge {
+  /* Match IMDb badge geometry exactly */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  /* Match IMDb gap */
+
+  min-width: 60px;
+  /* Matched to IMDb */
+  padding: 4px 6px;
+  /* Matched to IMDb */
+
+  border-radius: 8px 0 8px 0;
+  /* Matched to IMDb */
+
+  /* Black Background (Same as IMDb) */
+  background: linear-gradient(135deg, rgba(0, 0, 0, 1) 0%, rgba(20, 20, 20, 1) 100%);
+
+  /* Default Border (Gray - Exact match to IMDb) */
+  border: 1px solid #333333;
+
+  color: #FFFFFF;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+
+  box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+  user-select: none;
+
+  /* Animation */
+  opacity: 0;
+  transform: translateY(-4px);
+  animation: imdb-badge-appear 0.3s ease forwards;
+  animation-delay: 0.1s;
+
+  transition: all 0.2s ease;
+}
+
+/* Hover Effect - Red tint */
+.rt-rating-badge:hover {
+  background: linear-gradient(135deg, #000000 0%, #4a0d02 100%);
+  border-color: #FA320A;
+  transform: none;
+}
+
+.rt-icon {
+  width: 12px;
+  height: 12px;
+  background-color: #FA320A;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+/* Also ensure text size inside matches */
+.rt-rating-value {
+  font-size: 14px;
+  /* Matched to .imdb-rating-value */
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+/* Transition already defined in main .rt-rating-badge block */
+
+/* Container to hold both badges side-by-side */
+.badge-container {
+  position: absolute !important;
+  top: 2px !important;
+  left: 2px !important;
+  z-index: 9999;
+
+  display: flex !important;
+  flex-direction: row !important;
+  gap: 4px !important;
+  align-items: stretch !important;
+}
+
+/* Badge specific overrides when inside container */
+.badge-container .imdb-rating-badge {
+  position: static !important;
+  /* Let flexbox handle layout */
+  margin: 0 !important;
+  /* Remove shadow/transform that might conflict with container flow if needed */
+  transform: none !important;
+  top: auto !important;
+  left: auto !important;
+}
+
+.badge-container .rt-rating-badge {
+  /* No special overriding needed if it's static flex item */
+}
+
+/* Top Hero Metadata overrides for Container */
+[data-testid="title-metadata-main"] .badge-container {
+  position: static !important;
+  display: inline-flex !important;
+  width: fit-content !important;
+  align-self: flex-start !important;
+  margin-bottom: 16px !important;
+  margin-top: 8px !important;
 }
