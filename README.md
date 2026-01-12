@@ -13,6 +13,15 @@ A Chrome extension that displays IMDb ratings directly on Amazon Prime Video mov
 - 🔄 **Robust Fallbacks** - Handles "Director's Cut", ampersands, and subtitle variations automatically
 - 🎨 **Sleek design** - Opaque, flush-fitting badges that match Prime Video's aesthetic
 
+## Screenshots
+
+![Home Page Preview](screenshots/homepage-preview.png)
+*IMDb ratings seamlessly integrated into Prime Video thumbnails*
+
+<img src="screenshots/popup-preview.png" width="300" />
+
+*Customize rating visibility and filters*
+
 ## Installation
 
 ### From Source
