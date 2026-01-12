@@ -14,7 +14,7 @@
         DEBUG: false,
         DEBOUNCE_DELAY: 500,           // ms to wait before sending batch
         INTERSECTION_THRESHOLD: 0,      // Trigger as soon as it enters the margin
-        ROOT_MARGIN: '300px 0px 300px 0px', // Pre-load ratings for rows near viewport
+        ROOT_MARGIN: '800px 0px 800px 0px', // Pre-load ratings for rows near viewport
         PROCESSED_ATTR: 'data-imdb-processed',
         WORKER_URL: 'https://imdb-ratings-proxy.markymn-dev.workers.dev'
     };
@@ -45,7 +45,8 @@
             '._2RtpkI',
             '[class*="TitleCard"]',
             '[class*="packshot"]',
-            '[data-testid="super-carousel-card"]'
+            '[data-testid="super-carousel-card"]',
+            '[data-testid="atf-component"]' // Main Detail Hero
         ].join(', '),
 
         TITLE_ELEMENTS: [
@@ -73,7 +74,7 @@
         ].join(', ')
     };
 
-    const EXCLUDED_FROM_FILTER = '[data-testid="top-hero-card"], [data-testid="single-item-carousel"], [data-testid="intermission-hero-card"]';
+    const EXCLUDED_FROM_FILTER = '[data-testid="top-hero-card"], [data-testid="single-item-carousel"], [data-testid="intermission-hero-card"], [data-testid="atf-component"]';
     const FILTER_ATTR = 'data-pv-hidden';
 
     // ============================================
@@ -208,43 +209,53 @@
 
         // 4. Verification Data
         let verificationRating = null;
-
-        // If we found the native badge earlier (or if we just checked link match)
-        if (nativeBadge) {
-            const match = nativeBadge.textContent.match(/(\d+(?:\.\d+)?)/);
-            if (match) verificationRating = match[1];
-        }
-
-        // Final sanity check for verification (only valid if we are actually ON that page)
-        // If we forced href above, this is guaranteed true.
-        // If we didn't force it (e.g. valid link found elsewhere), we still check match.
-        const currentUrl = window.location.href;
-        if (href && currentUrl.includes(href)) {
-            if (verificationRating) log('Verification Logic Active for:', title, 'Rating:', verificationRating);
-        } else {
-            // If mismatched, discard verification rating to prevent false positives?
-            // Actually, if we scraped 'verificationRating' from 'nativeBadge' inside THIS container,
-            // but the 'term' href derived from link logic points elsewhere...
-            // THEN we have the "Main Hero" problem again.
-            // BUT, the 'if (isDetailPage && nativeBadge)' block above handles this priority.
-            // So if we are here, we are either:
-            // A) Main Hero (Handled)
-            // B) Some other card that happens to have a rating badge? (Unlikely)
-            // C) Standard card
-
-            if (verificationRating && (!href || !currentUrl.includes(href))) {
-                // We found a rating badge but the link points elsewhere? 
-                // This implies we scraped the Main Page badge but assigned it to a sub-element?
-                // Safer to nullify verification if href mismatches.
-                verificationRating = null;
+        if (isDetailPage) {
+            const imdbBadge = container.querySelector('[data-automation-id="imdb-rating-badge"]');
+            if (imdbBadge) {
+                const match = imdbBadge.textContent.match(/(\d+(?:\.\d+)?)/);
+                if (match) verificationRating = match[1];
             }
         }
 
-        return { title, href, entityType, verificationRating };
+        // 5. Release Year
+        let year = null;
+        if (isDetailPage) {
+            const yearBadge = container.querySelector('[data-automation-id="release-year-badge"]');
+            if (yearBadge) {
+                // Try text content first (e.g. "2025")
+                const yearText = yearBadge.textContent.trim();
+                // Basic check if it looks like a year
+                if (/^\d{4}$/.test(yearText)) {
+                    year = yearText;
+                } else {
+                    // Try aria-label (e.g. "Released 2025")
+                    const aria = yearBadge.getAttribute('aria-label');
+                    if (aria) {
+                        const match = aria.match(/(\d{4})/);
+                        if (match) year = match[1];
+                    }
+                }
+            }
+        }
+
+        if (isDetailPage) {
+            const isHero = container.querySelector('.dv-node-dp-details-metdatablock') !== null;
+            if (isHero) {
+                log('!!! PROCESSING HERO CONTAINER !!!');
+                const imdbBadge = container.querySelector('[data-automation-id="imdb-rating-badge"]');
+                log('Hero Badge Found?', !!imdbBadge, imdbBadge ? imdbBadge.outerHTML : '');
+
+                const yearBadge = container.querySelector('[data-automation-id="release-year-badge"]');
+                log('Hero Year Badge Found?', !!yearBadge, yearBadge ? yearBadge.outerHTML : '');
+            }
+            log(`[Detail Page Extraction] Title: "${title}", Rating: ${verificationRating}, Year: ${year}`);
+        }
+
+        return { title, href, entityType, verificationRating, year };
     };
 
     const calculateBatchSize = (row) => {
-        if (row.matches('[data-testid="top-hero-card"], [data-testid="single-item-carousel"], [data-testid="intermission-hero-card"]')) {
+        if (row.matches('[data-testid="top-hero-card"], [data-testid="single-item-carousel"], [data-testid="intermission-hero-card"], [data-testid="atf-component"]')) {
             return 1;
         }
         const rowWidth = row.offsetWidth;
@@ -334,6 +345,9 @@
     };
 
     const injectBadge = (container, rating, votes, rtRating) => {
+        // Skip injection for Detail Page Hero (Main Component) -> Verification only
+        if (container.matches('[data-testid="atf-component"]')) return;
+
         let target;
         if (container.matches('[data-testid="top-hero-card"], [data-testid="single-item-carousel"], [data-testid="intermission-hero-card"]')) {
             target = container.querySelector('[data-testid="title-metadata-main"]');
@@ -413,7 +427,8 @@
             title: item.info.title,
             href: item.info.href,
             entityType: item.info.entityType,
-            verificationRating: item.info.verificationRating
+            verificationRating: item.info.verificationRating,
+            year: item.info.year
         }));
 
         batch.forEach(item => {
@@ -471,18 +486,29 @@
             if (!info || !info.href) continue;
 
             if (state.processedItems.has(info.href)) {
-                const cached = state.sessionCache.get(info.href);
-                if (cached) {
-                    injectBadge(item, cached.rating, cached.votes, cached.rt_rating);
-                    item.setAttribute(CONFIG.PROCESSED_ATTR, 'cache-hit');
-                } else {
-                    if (!state.pendingContainers.has(info.href)) {
-                        state.pendingContainers.set(info.href, new Set());
+                // EXCEPTION: If this is the Main Hero with Verification Data (Year + Rating),
+                // and we are on the detail page, we MUST ensure the backend logic ran with this data.
+                // If the item was previously processed by a generic card (e.g. recommendation), it sent null/null.
+                // We force a re-send here.
+                const isDetailPage = window.location.href.includes('/detail/');
+                const isHeroVerification = info.verificationRating && info.year && isDetailPage;
+
+                if (!isHeroVerification) {
+                    const cached = state.sessionCache.get(info.href);
+                    if (cached) {
+                        injectBadge(item, cached.rating, cached.votes, cached.rt_rating);
+                        item.setAttribute(CONFIG.PROCESSED_ATTR, 'cache-hit');
+                    } else {
+                        if (!state.pendingContainers.has(info.href)) {
+                            state.pendingContainers.set(info.href, new Set());
+                        }
+                        state.pendingContainers.get(info.href).add(item);
+                        item.setAttribute(CONFIG.PROCESSED_ATTR, 'pending-queue');
                     }
-                    state.pendingContainers.get(info.href).add(item);
-                    item.setAttribute(CONFIG.PROCESSED_ATTR, 'pending-queue');
+                    continue;
+                } else {
+                    log('Force-processing Hero Item to ensure Verification:', info.title);
                 }
-                continue;
             }
 
             currentBatch.push({ container: item, info });
@@ -628,23 +654,36 @@
             rootMargin: CONFIG.ROOT_MARGIN
         });
 
+        const throttle = (func, limit) => {
+            let inThrottle;
+            return function () {
+                const args = arguments;
+                const context = this;
+                if (!inThrottle) {
+                    func.apply(context, args);
+                    inThrottle = true;
+                    setTimeout(() => inThrottle = false, limit);
+                }
+            }
+        };
+
+        const throttledScan = throttle(scan, 250);
+
         state.observer = new MutationObserver((mutations) => {
             let added = false;
             mutations.forEach(m => {
                 if (m.addedNodes.length) added = true;
             });
-            if (added) scan();
+            if (added) throttledScan();
         });
         state.observer.observe(document.body, { childList: true, subtree: true });
     };
 
     const scan = () => {
-        log('Scanning page for containers...');
         const wrappers = document.querySelectorAll(SELECTORS.CAROUSEL_WRAPPERS);
         wrappers.forEach(wrapper => state.intersectionObserver.observe(wrapper));
 
         const containers = document.querySelectorAll(SELECTORS.THUMBNAIL_CONTAINERS);
-        log(`Found ${containers.length} potential movie containers.`);
         containers.forEach(container => {
             if (container.hasAttribute(CONFIG.PROCESSED_ATTR)) return;
             const parentRow = container.closest(SELECTORS.CAROUSEL_WRAPPERS);

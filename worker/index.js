@@ -116,8 +116,11 @@ async function handleBatchLookup(request, env) {
 }
 
 async function processMovieLogic(movie, cached, env) {
-    let { title, href, entityType, verificationRating } = movie;
+    let { title, href, entityType, verificationRating, year } = movie;
     if (!href) return { href, error: 'Missing href' };
+
+    // Standardize year
+    if (year) year = parseInt(year);
 
     if (cached) {
         if (!isDataStale(cached.release_date, cached.updated_at)) {
@@ -127,7 +130,6 @@ async function processMovieLogic(movie, cached, env) {
                 const localRating = parseFloat(verificationRating);
                 // If cached rating differs significantly from local rating, invalidate cache
                 if (Math.abs(cachedRating - localRating) >= 0.2) {
-                    console.warn(`[Cache Invalidation] Mismatch for ${title}: DB=${cachedRating} vs Local=${localRating}`);
                     // Proceed to API fetch (fall through)
                     // We don't mark as 'cache' yet, we fall through to API fetch
                 } else {
@@ -166,6 +168,7 @@ async function processMovieLogic(movie, cached, env) {
 
         if (!title && !cached.title) return { href, data: cached, source: 'cache-stale' };
         if (!title) title = cached.title; // Use cached title if missing from payload
+        if (!year && cached.year) year = cached.year; // Use cached year if available
     }
 
     if (!title) {
@@ -182,10 +185,10 @@ async function processMovieLogic(movie, cached, env) {
     try {
         let omdbResult = null;
 
-        // Step 1: Try title lookup with cleaned title
-        omdbResult = await fetchOMDbTitle(title, null, env.OMDB_API_KEY);
+        // Step 1: Try title lookup with cleaned title AND year if available
+        omdbResult = await fetchOMDbTitle(title, year, env.OMDB_API_KEY);
 
-        // Validate result
+        // Validation
         if (omdbResult) {
             const isValid = isValidResult(omdbResult, entityType);
             if (!isValid) omdbResult = null;
@@ -197,6 +200,7 @@ async function processMovieLogic(movie, cached, env) {
         if (verificationRating) {
             if (!omdbResult || !omdbResult.imdbRating || omdbResult.imdbRating === 'N/A' ||
                 Math.abs(parseFloat(omdbResult.imdbRating) - parseFloat(verificationRating)) >= 0.2) {
+
                 needsFallback = true;
                 // Discard bad result if it was a mismatch
                 omdbResult = null;
@@ -210,14 +214,14 @@ async function processMovieLogic(movie, cached, env) {
             // Step 2: Ampersand replacement (Common fallback)
             if (title.includes('&')) {
                 const altTitle = title.replace(/&/g, ' and ').replace(/\s+/g, ' ').trim();
-                omdbResult = await fetchOMDbTitle(altTitle, null, env.OMDB_API_KEY);
+                omdbResult = await fetchOMDbTitle(altTitle, year, env.OMDB_API_KEY);
                 if (omdbResult && !isValidResult(omdbResult, entityType)) omdbResult = null;
             }
         }
 
         // Step 3: Search API Fallback
         if (!omdbResult && needsFallback) {
-            omdbResult = await fetchOMDbSearch(title, env.OMDB_API_KEY);
+            omdbResult = await fetchOMDbSearch(title, year, env.OMDB_API_KEY);
         }
 
         // Step 4: Special Character Truncation (The Critical Split Logic)
@@ -225,21 +229,19 @@ async function processMovieLogic(movie, cached, env) {
             const specialCharMatch = title.match(/[-:&]/);
             if (specialCharMatch) {
                 if (verificationRating) {
-                    // REVERSE FALLBACK (Specific to Verification Mismatch/Fail on Detail Page)
-                    // "Live Die Repeat: Edge of Tomorrow" -> "Edge of Tomorrow"
-                    // Truncate BEFORE special char (Keep Right)
+                    // Reverse Fallback for Verification Mismatch
                     const reverseTitle = title.substring(specialCharMatch.index + 1).trim();
                     if (reverseTitle.length > 2) {
-                        console.log(`[Smart Fallback] Check Reverse title: "${reverseTitle}"`);
-                        omdbResult = await fetchOMDbSearch(reverseTitle, env.OMDB_API_KEY);
+                        omdbResult = await fetchOMDbTitle(reverseTitle, year, env.OMDB_API_KEY);
+                        if (!omdbResult) {
+                            omdbResult = await fetchOMDbSearch(reverseTitle, year, env.OMDB_API_KEY);
+                        }
                     }
                 } else {
-                    // STANDARD FALLBACK
-                    // "Mission: Impossible - Fallout" -> "Mission: Impossible"
-                    // Truncate AFTER special char (Keep Left)
+                    // Standard Fallback
                     const truncatedTitle = title.substring(0, specialCharMatch.index).trim();
                     if (truncatedTitle.length > 2) {
-                        omdbResult = await fetchOMDbSearch(truncatedTitle, env.OMDB_API_KEY);
+                        omdbResult = await fetchOMDbSearch(truncatedTitle, year, env.OMDB_API_KEY);
                     }
                 }
             }
@@ -331,8 +333,9 @@ async function fetchOMDbById(imdbId, apiKey) {
 /**
  * OMDb Search API - returns first result with full details
  */
-async function fetchOMDbSearch(title, apiKey) {
+async function fetchOMDbSearch(title, year, apiKey) {
     const params = new URLSearchParams({ apikey: apiKey, s: title });
+    if (year) params.append('y', year);
     const res = await fetch(`${OMDB_BASE_URL}/?${params}`);
     const data = await res.json();
 

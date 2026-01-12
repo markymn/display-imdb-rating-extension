@@ -35,7 +35,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message.type) {
         case 'BATCH_LOOKUP':
             handleBatchLookup(message, sendResponse);
-            return true; // Keep channel open for async response
+            return true;
 
         default:
             sendResponse({ error: 'Unknown message type' });
@@ -43,9 +43,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
-/**
- * Handle batch lookup via Cloudflare Worker
- */
 async function handleBatchLookup(message, sendResponse) {
     try {
         const { movies } = message;
