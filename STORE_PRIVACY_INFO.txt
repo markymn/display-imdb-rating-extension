@@ -1,0 +1,41 @@
+### Single Purpose Description
+This extension adds IMDb ratings to movie thumbnails on Amazon Prime Video to help users identify high-rated content.
+
+### Permission Justification
+- **storage**: Used to store user preferences for badge visibility and rating filters locally on the device.
+- **Host Permissions (workers.dev)**: Required to fetch rating data from our backend proxy. This proxy connects to the OMDb API securely without exposing keys and caches results to improve performance.
+
+### Remote Code
+**No, I am not using Remote code.**
+(The extension fetches JSON data from an API, it does not execute remote JavaScript).
+
+### Data Usage
+**Website Content**: Check this box.
+*Justification*: The extension reads the text content (movie titles) of the Amazon Prime Video pages you visit in order to search for the corresponding IMDb rating. This data is sent to our server solely for the purpose of retrieving the rating and is not linked to your identity.
+
+### Privacy Policy
+Since you are sending data (movie titles) to a remote server (Cloudflare), you generally need a Privacy Policy. I have included a template below that you can copy, paste into a GitHub Gist (gist.github.com), and use that URL.
+
+---
+## Privacy Policy
+
+**Effective Date:** 2026-01-12
+
+**1. Data Collection**
+The "ShowRating" extension processes the text content (specifically, movie and TV show titles) of the Amazon Prime Video pages you visit. This data is transmitted to our backend provider (Cloudflare) solely for the purpose of retrieving public rating information from the OMDb API.
+
+**2. Data Usage**
+We do not store your browsing history, IP address, or any personally identifiable information.
+- **Movie Titles**: Sent to our server to fetch ratings.
+- **Cache**: Successful rating lookups are temporarily cached in a database to improve performance for other users. This cached data contains only the Movie Title and its Rating. It contains no user data.
+
+**3. User Preferences**
+Settings such as "Minimum Rating Filter" or "Badge Visibility" are stored locally on your device using Chrome's Storage API and are never transmitted to us.
+
+**4. Third-Party Services**
+- **OMDb API**: Used to retrieve movie ratings.
+- **Cloudflare**: Hosts our backend logic and database.
+
+**5. Contact**
+If you have questions about this policy, please contact the developer via the Chrome Web Store support page.
+---

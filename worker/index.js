@@ -69,7 +69,7 @@ async function handleBatchLookup(request, env) {
 
         // 2. Process movies (Cache check -> OMDb fetch if needed)
         const updates = [];
-        const results = await Promise.all(
+        const settled = await Promise.allSettled(
             movies.map(async (movie) => {
                 const cached = cachedMap.get(movie.href);
                 const result = await processMovieLogic(movie, cached, env);
@@ -79,6 +79,9 @@ async function handleBatchLookup(request, env) {
                 }
                 return result;
             })
+        );
+        const results = settled.map((s, i) =>
+            s.status === 'fulfilled' ? s.value : { href: movies[i].href, error: s.reason?.message || 'Unknown error' }
         );
 
         // 3. Batch D1 Saves

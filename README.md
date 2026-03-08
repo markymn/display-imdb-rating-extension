@@ -1,4 +1,4 @@
-# IMDb Ratings on Prime Video
+# ShowRating
 
 A Chrome extension that displays IMDb ratings directly on Amazon Prime Video movie thumbnails.
 
@@ -49,11 +49,11 @@ You need [Wrangler](https://developers.cloudflare.com/workers/wrangler/install-a
 npx wrangler login
 
 # Create D1 Database
-npx wrangler d1 create imdb-ratings-db
+npx wrangler d1 create showrating-db
 # COPY THE "database_id" from the output and paste it into worker/wrangler.toml
 
 # Initialize Schema
-npx wrangler d1 execute imdb-ratings-db --remote --file=./schema.sql
+npx wrangler d1 execute showrating-db --remote --file=./schema.sql
 
 # Set API Key Secret
 npx wrangler secret put OMDB_API_KEY
@@ -69,7 +69,7 @@ npx wrangler deploy
 Edit `background.js` and replace the placeholder URL with your deployed worker URL:
 
 ```javascript
-const PROXY_URL = 'https://imdb-ratings-proxy.YOUR_SUBDOMAIN.workers.dev';
+const PROXY_URL = 'https://showrating-proxy.YOUR_SUBDOMAIN.workers.dev';
 ```
 
 ## Project Structure

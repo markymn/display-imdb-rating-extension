@@ -22,23 +22,14 @@
   padding: 4px 6px;
   border-radius: 8px 0 8px 0;
 
-  /* Opaque dark background */
-  background: linear-gradient(135deg,
-      rgba(0, 0, 0, 1) 0%,
-      rgba(20, 20, 20, 1) 100%);
-  /* Opaque border */
+  /* Opaque dark background — solid color, no gradient */
+  background: #0a0a0a;
   border: 1px solid #333333;
 
-  /* Subtle shadow for depth */
-  box-shadow:
-    0 2px 8px rgba(0, 0, 0, 0.4),
-    0 1px 3px rgba(0, 0, 0, 0.2);
+  /* box-shadow removed — causes GPU paint overhead with 50+ badges */
 
-  /* Smooth appearance */
-  opacity: 0;
-  transform: translateY(-4px);
-  animation: imdb-badge-appear 0.3s ease forwards;
-  animation-delay: 0.1s;
+  /* Instant appear — no animation overhead */
+  opacity: 1;
 
   /* Prevent text selection */
   user-select: none;
@@ -50,9 +41,7 @@
   font-weight: 600;
   line-height: 1;
 
-  /* Backdrop blur for modern browsers */
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
+  /* backdrop-filter removed — causes GPU lag with 50+ badges */
 }
 
 /* Custom position for Top Hero wrapper - inside metadata */
@@ -66,42 +55,26 @@
   /* Restore standard visuals by removing overrides */
 }
 
-/* Badge appear animation */
-@keyframes imdb-badge-appear {
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
 
 /* IMDb star icon */
 .imdb-rating-star {
   color: #f5c518;
-  /* IMDb yellow */
   font-size: 14px;
   line-height: 1;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 /* Rating value text */
 .imdb-rating-value {
   color: #ffffff;
   font-size: 14px;
-  /* Larger text */
   font-weight: 700;
-  /* Bolder */
   letter-spacing: 0.5px;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
-/* Hover effect - static gradient */
+/* Hover effect */
 .imdb-rating-badge:hover {
-  background: linear-gradient(135deg,
-      #000000 0%,
-      #4a3b00 100%);
+  background: #1a1500;
   border-color: #f5c518;
-  transform: none;
-  transition: all 0.2s ease;
 }
 
 /* Loading state */
@@ -163,31 +136,11 @@
   font-size: 10px;
 }
 
-/* Ensure badge doesn't interfere with Prime's hover states */
+/* Hover transition — only border-color to minimize repaints */
 .imdb-rating-badge {
-  transition:
-    opacity 0.2s ease,
-    transform 0.2s ease,
-    background 0.2s ease,
-    border-color 0.2s ease;
+  transition: border-color 0.2s ease;
 }
 
-/* Reduce motion for accessibility */
-@media (prefers-reduced-motion: reduce) {
-  .imdb-rating-badge {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
-
-  .imdb-rating-spinner {
-    animation: none;
-  }
-
-  .imdb-rating-badge:hover {
-    transform: none;
-  }
-}
 
 /* Dark mode compatibility (Prime Video is always dark) */
 @media (prefers-color-scheme: dark) {
@@ -225,10 +178,7 @@
   border-radius: 8px 0 8px 0;
   /* Matched to IMDb */
 
-  /* Black Background (Same as IMDb) */
-  background: linear-gradient(135deg, rgba(0, 0, 0, 1) 0%, rgba(20, 20, 20, 1) 100%);
-
-  /* Default Border (Gray - Exact match to IMDb) */
+  background: #0a0a0a;
   border: 1px solid #333333;
 
   color: #FFFFFF;
@@ -236,25 +186,18 @@
   font-size: 12px;
   font-weight: 600;
   line-height: 1;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 
-  box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+  /* box-shadow removed — causes GPU paint overhead with 50+ badges */
   user-select: none;
+  opacity: 1;
 
-  /* Animation */
-  opacity: 0;
-  transform: translateY(-4px);
-  animation: imdb-badge-appear 0.3s ease forwards;
-  animation-delay: 0.1s;
-
-  transition: all 0.2s ease;
+  transition: border-color 0.2s ease;
 }
 
 /* Hover Effect - Red tint */
 .rt-rating-badge:hover {
-  background: linear-gradient(135deg, #000000 0%, #4a0d02 100%);
+  background: #1a0500;
   border-color: #FA320A;
-  transform: none;
 }
 
 .rt-icon {
